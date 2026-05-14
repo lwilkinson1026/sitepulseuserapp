@@ -283,7 +283,6 @@ function App() {
 
   const socColor = status ? getSocColor(status.battery_soc) : 'var(--sp-accent)';
   const isLowSoc = status ? status.battery_soc < 20 : false;
-  const isCharging = status?.system_mode === 'charging';
 
   // ---------------------- CONNECTION SCREEN ----------------------
   if (!isConnected) {
@@ -369,23 +368,19 @@ function App() {
     <div className="min-h-screen bg-[#0b0c0f] text-white pb-10">
       <Toaster position="top-center" richColors closeButton />
 
-      {/* Ultra-minimal top bar */}
+      {/* Ultra-minimal top bar — matches sitepulse.space restraint */}
       <div className="topbar">
-        <div>
+        <div className="flex items-center gap-2">
           <span className="title">SITEPULSE</span>
-          {isDemoMode && <span className="ml-2 text-[10px] px-2 py-px bg-[#1f222a] rounded text-[#52525b]">DEMO</span>}
+          {isDemoMode && (
+            <span className="text-[9px] px-1.5 py-px bg-[#1f222a] text-[#52525b] tracking-widest">DEMO</span>
+          )}
         </div>
 
-        <div className="flex items-center gap-4 text-sm">
-          <div className="status">
-            <div className={`status-dot ${isLowSoc ? 'danger' : ''}`} />
-            <span>{isDemoMode ? 'Simulated' : 'Live'}</span>
-          </div>
-
-          <button onClick={refresh} disabled={isLoading} className="p-1 -mr-1 active:opacity-60 transition">
-            <RefreshCw className={`w-4 h-4 text-[#52525b] ${isLoading ? 'animate-spin' : ''}`} />
+        <div className="flex items-center gap-3">
+          <button onClick={refresh} disabled={isLoading} className="p-1 active:opacity-50 transition">
+            <RefreshCw className={`w-3.5 h-3.5 text-[#52525b] ${isLoading ? 'animate-spin' : ''}`} />
           </button>
-
           <button
             onClick={() => {
               localStorage.removeItem('sitepulse_last_url');
@@ -393,98 +388,92 @@ function App() {
               setStatus(null);
               setControllerUrl('');
             }}
-            className="p-1 -mr-1 active:opacity-60 transition"
+            className="p-1 active:opacity-50 transition"
           >
-            <Settings className="w-4 h-4 text-[#52525b]" />
+            <Settings className="w-3.5 h-3.5 text-[#52525b]" />
           </button>
         </div>
       </div>
 
-      {/* BATTERY — the hero section */}
-      <div className="section pt-8">
-        <div className="text-label mb-3 tracking-[1px]">BATTERY BANK</div>
-
-        {/* Enormous, calm SOC number */}
-        <div className="flex items-baseline gap-1">
-          <div 
-            className="text-hero tabular-nums tracking-[-3.5px]" 
-            style={{ color: socColor }}
-          >
-            {status.battery_soc.toFixed(0)}
-          </div>
-          <div className="text-2xl text-[#52525b] font-medium pb-2">%</div>
+      {/* UNIT IDENTIFIER + LIVE TELEMETRY — direct replication of sitepulse.space header style */}
+      <div className="px-5 pt-4 pb-2">
+        <div className="text-[10px] tracking-[1.5px] text-[#52525b] font-medium">
+          UNIT-001 · BOZEMAN PLANT
         </div>
 
-        {/* Thin, elegant progress bar */}
-        <div className={`progress mt-4 mb-7 ${isLowSoc ? 'danger' : ''}`}>
-          <div 
-            className="progress-bar" 
-            style={{ 
-              width: `${Math.max(2, status.battery_soc)}%`,
-              background: socColor 
-            }} 
-          />
+        <div className="flex items-center gap-2 mt-1 mb-3">
+          <div className="text-[11px] tracking-[2px] text-[#a1a1aa] font-medium">LIVE TELEMETRY</div>
+          <div className={`w-1 h-1 rounded-full ${isLowSoc ? 'bg-[#ef4444]' : 'bg-[#10b981]'} animate-pulse`} />
         </div>
 
-        {/* Three precise metrics — generous breathing room */}
-        <div className="grid grid-cols-3 gap-px bg-[#1a1c22] rounded-xl overflow-hidden">
-          <div className="bg-[#14151a] px-5 py-4 text-center">
-            <div className="text-label mb-1">VOLTAGE</div>
-            <div className="text-metric tabular-nums tracking-[-1px]">{status.battery_voltage.toFixed(1)}</div>
-            <div className="text-[11px] text-[#52525b] -mt-0.5">V DC</div>
-          </div>
-          <div className="bg-[#14151a] px-5 py-4 text-center">
-            <div className="text-label mb-1">CURRENT</div>
-            <div 
-              className="text-metric tabular-nums tracking-[-1px]" 
-              style={{ color: status.battery_current < 0 ? 'var(--sp-success)' : undefined }}
-            >
-              {status.battery_current > 0 ? '+' : ''}{status.battery_current.toFixed(1)}
+        {/* Two primary live metrics — styled exactly like the marketing site */}
+        <div className="grid grid-cols-2 gap-4">
+          {/* Battery SOC — hero metric */}
+          <div>
+            <div className="text-[10px] tracking-[1px] text-[#52525b] mb-px">BATTERY SOC</div>
+            <div className="flex items-baseline">
+              <span 
+                className="text-[56px] leading-none font-semibold tracking-[-3.2px] tabular-nums" 
+                style={{ color: socColor }}
+              >
+                {status.battery_soc.toFixed(0)}
+              </span>
+              <span className="text-2xl text-[#52525b] ml-1">%</span>
             </div>
-            <div className="text-[11px] text-[#52525b] -mt-0.5">A</div>
           </div>
-          <div className="bg-[#14151a] px-5 py-4 text-center">
-            <div className="text-label mb-1">TEMP</div>
-            <div className="text-metric tabular-nums tracking-[-1px]">{status.battery_temp.toFixed(1)}</div>
-            <div className="text-[11px] text-[#52525b] -mt-0.5">°C</div>
-          </div>
-        </div>
 
-        {/* Charging / discharging state — very subtle */}
-        <div className="mt-3 text-center">
-          <span className="text-xs tracking-[1px] text-[#52525b]">
-            {isCharging ? 'CHARGING' : status.battery_current >= 0 ? 'DISCHARGING' : 'CHARGING'}
-          </span>
+          {/* Current Load / Power */}
+          <div>
+            <div className="text-[10px] tracking-[1px] text-[#52525b] mb-px">LOAD</div>
+            <div className="flex items-baseline">
+              <span className="text-[56px] leading-none font-semibold tracking-[-3.2px] tabular-nums">
+                {status.inverter_power}
+              </span>
+              <span className="text-2xl text-[#52525b] ml-1">W</span>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* INVERTER OUTPUT — second most important metric */}
-      <div className="section">
-        <div className="text-label mb-2 tracking-[1px]">INVERTER OUTPUT</div>
+      {/* Thin technical metadata strip — exactly like sitepulse.space */}
+      <div className="px-5 py-2 text-[9px] tracking-[0.5px] text-[#52525b] border-y border-[#24262d] flex items-center gap-2 flex-wrap">
+        <span>IP65</span>
+        <span className="text-[#2a2d36]">·</span>
+        <span>−20°C TO +50°C</span>
+        <span className="text-[#2a2d36]">·</span>
+        <span>CYCLE 2,418 / 6,000</span>
+        <span className="text-[#2a2d36]">·</span>
+        <span>~90 LB DRY</span>
+      </div>
 
-        <div className="flex items-baseline">
-          <div className="text-hero tabular-nums tracking-[-2.8px]">{status.inverter_power}</div>
-          <div className="text-3xl text-[#52525b] font-medium pb-1 ml-1">W</div>
+      {/* Supporting details — V / A / °C + thin SOC progress (kept minimal) */}
+      <div className="px-5 pt-5">
+        {/* Thin progress bar under the hero SOC (from LIVE TELEMETRY) */}
+        <div className={`progress mb-5 ${isLowSoc ? 'danger' : ''}`}>
+          <div 
+            className="progress-bar" 
+            style={{ width: `${Math.max(2, status.battery_soc)}%`, background: socColor }} 
+          />
         </div>
 
-        <div className="text-sm text-[#52525b] mt-0.5">
-          {status.inverter_voltage.toFixed(0)} V  ·  {status.inverter_frequency.toFixed(2)} Hz
-        </div>
-
-        {/* Load — thin and quiet */}
-        <div className="mt-6">
-          <div className="flex items-center justify-between text-xs text-[#52525b] mb-1.5">
-            <div>LOAD</div>
-            <div className="tabular-nums">{status.inverter_load_percent.toFixed(0)}%</div>
+        {/* Three supporting metrics in a very clean row — technical instrument style */}
+        <div className="grid grid-cols-3 gap-2 text-center text-xs">
+          <div className="bg-[#14151a] py-3 rounded-lg">
+            <div className="text-[#52525b] tracking-widest text-[9px]">VOLTAGE</div>
+            <div className="font-medium tabular-nums tracking-tight text-lg mt-0.5">{status.battery_voltage.toFixed(1)} <span className="text-[#52525b] text-xs">V</span></div>
           </div>
-          <div className={`progress ${status.inverter_load_percent > 85 ? 'danger' : ''}`}>
+          <div className="bg-[#14151a] py-3 rounded-lg">
+            <div className="text-[#52525b] tracking-widest text-[9px]">CURRENT</div>
             <div 
-              className="progress-bar" 
-              style={{ 
-                width: `${status.inverter_load_percent}%`,
-                background: status.inverter_load_percent > 85 ? 'var(--sp-danger)' : 'var(--sp-accent)'
-              }} 
-            />
+              className="font-medium tabular-nums tracking-tight text-lg mt-0.5"
+              style={{ color: status.battery_current < 0 ? '#10b981' : undefined }}
+            >
+              {status.battery_current > 0 ? '+' : ''}{status.battery_current.toFixed(1)} <span className="text-[#52525b] text-xs">A</span>
+            </div>
+          </div>
+          <div className="bg-[#14151a] py-3 rounded-lg">
+            <div className="text-[#52525b] tracking-widest text-[9px]">TEMP</div>
+            <div className="font-medium tabular-nums tracking-tight text-lg mt-0.5">{status.battery_temp.toFixed(1)} <span className="text-[#52525b] text-xs">°C</span></div>
           </div>
         </div>
       </div>
