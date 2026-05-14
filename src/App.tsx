@@ -100,11 +100,14 @@ function App() {
   }, []);
 
   // Fetch status from controller (or simulate in demo mode)
-  const fetchStatus = useCallback(async (url?: string): Promise<SystemStatus | null> => {
+  const fetchStatus = useCallback(async (
+    url?: string,
+    options?: { forceReal?: boolean }
+  ): Promise<SystemStatus | null> => {
     const targetUrl = url || controllerUrl;
 
-    if (!targetUrl || isDemoMode) {
-      // DEMO MODE - smooth simulated hardware
+    // Only use demo data if we're in demo mode AND not explicitly forcing a real fetch
+    if (!targetUrl || (isDemoMode && !options?.forceReal)) {
       const newStatus = generateDemoStatus(status || undefined);
       return newStatus;
     }
@@ -113,13 +116,13 @@ function App() {
       const res = await fetch(`${targetUrl.replace(/\/$/, '')}/status`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(6500),
+        signal: AbortSignal.timeout(8000),
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       const data = await res.json();
-      // Basic validation / normalization
+
       return {
         battery_soc: Number(data.battery_soc ?? 0),
         battery_voltage: Number(data.battery_voltage ?? 0),
@@ -203,7 +206,8 @@ function App() {
         setIsDemoMode(false);
         setControllerUrl(cleanUrl);
         
-        const freshStatus = await fetchStatus(cleanUrl);
+        // Force a real network request on initial connect (bypasses stale isDemoMode state)
+        const freshStatus = await fetchStatus(cleanUrl, { forceReal: true });
         if (freshStatus) {
           setStatus(freshStatus);
           setIsConnected(true);
@@ -229,7 +233,7 @@ function App() {
     if (!isConnected) return;
     setIsLoading(true);
     try {
-      const fresh = await fetchStatus();
+      const fresh = await fetchStatus(undefined, { forceReal: !isDemoMode });
       if (fresh) {
         setStatus(fresh);
         if (!isDemoMode) toast.info('Status updated');
@@ -247,7 +251,7 @@ function App() {
 
     const interval = setInterval(async () => {
       try {
-        const fresh = await fetchStatus();
+        const fresh = await fetchStatus(undefined, { forceReal: !isDemoMode });
         if (fresh) {
           setStatus(fresh);
         }
