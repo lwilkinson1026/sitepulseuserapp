@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Battery, Zap, Clock, RefreshCw, Power, Wifi, WifiOff, Settings, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Settings } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Toaster, toast } from 'sonner';
-import { formatDistanceToNow } from 'date-fns';
+
+// Note: All styles are in index.css (Tailwind v4 + custom SitePulse design system)
 
 // Type definitions matching the SitePulse Controller Architecture Spec
 interface SystemStatus {
@@ -42,11 +43,11 @@ function App() {
   const [controllerUrl, setControllerUrl] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
   const [isDemoMode, setIsDemoMode] = useState(true);
+  const [showHardwareInput, setShowHardwareInput] = useState(false);
 
   // Live system state
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [lastSync, setLastSync] = useState<Date | null>(null);
 
   // Polling interval (5s per spec recommendation)
   const POLL_INTERVAL = 5000;
@@ -167,7 +168,6 @@ function App() {
       const fresh = await fetchStatus();
       if (fresh) {
         setStatus(fresh);
-        setLastSync(new Date());
       }
       toast.success(`Outlet ${channel} ${desiredState ? 'ON' : 'OFF'}`);
     } catch (err) {
@@ -197,7 +197,6 @@ function App() {
         const demoStatus = generateDemoStatus();
         setStatus(demoStatus);
         setIsConnected(true);
-        setLastSync(new Date());
         localStorage.setItem('sitepulse_last_url', DEMO_CONTROLLER_URL);
         toast.success('Connected in Demo Mode — realistic live simulation');
       } else {
@@ -208,7 +207,6 @@ function App() {
         if (freshStatus) {
           setStatus(freshStatus);
           setIsConnected(true);
-          setLastSync(new Date());
           localStorage.setItem('sitepulse_last_url', cleanUrl);
           toast.success('Connected to SitePulse Controller');
         }
@@ -220,7 +218,6 @@ function App() {
       const demoStatus = generateDemoStatus();
       setStatus(demoStatus);
       setIsConnected(true);
-      setLastSync(new Date());
       toast.error('Could not reach controller — running in Demo Mode');
     } finally {
       setIsLoading(false);
@@ -235,7 +232,6 @@ function App() {
       const fresh = await fetchStatus();
       if (fresh) {
         setStatus(fresh);
-        setLastSync(new Date());
         if (!isDemoMode) toast.info('Status updated');
       }
     } catch (e) {
@@ -254,7 +250,6 @@ function App() {
         const fresh = await fetchStatus();
         if (fresh) {
           setStatus(fresh);
-          setLastSync(new Date());
         }
       } catch {
         // silent fail in background polling
@@ -275,319 +270,270 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Helper to get SOC color
+  // ============================================
+  // NEW MINIMALIST HIGH-END RENDER
+  // ============================================
+
+  // Helper — calm status color for the thin progress bar
   const getSocColor = (soc: number) => {
-    if (soc > 55) return 'var(--sp-success)';
-    if (soc > 25) return 'var(--sp-warning)';
-    return 'var(--sp-danger)';
+    if (soc < 15) return 'var(--sp-danger)';
+    if (soc < 35) return 'var(--sp-warning)';
+    return 'var(--sp-success)';
   };
 
-  const socColor = status ? getSocColor(status.battery_soc) : 'var(--sp-primary)';
+  const socColor = status ? getSocColor(status.battery_soc) : 'var(--sp-accent)';
+  const isLowSoc = status ? status.battery_soc < 20 : false;
+  const isCharging = status?.system_mode === 'charging';
 
-  // Render the beautiful SOC circular gauge
-  const renderSOCGauge = (soc: number) => {
-    const radius = 78;
-    const circumference = 2 * Math.PI * radius;
-    const offset = circumference * (1 - soc / 100);
-
-    return (
-      <div className="soc-gauge mx-auto">
-        <svg width="180" height="180" viewBox="0 0 180 180" className="drop-shadow-sm">
-          {/* Background track */}
-          <circle
-            cx="90" cy="90" r={radius}
-            fill="none"
-            stroke="var(--sp-border)"
-            strokeWidth="14"
-          />
-          {/* Progress arc */}
-          <motion.circle
-            cx="90" cy="90" r={radius}
-            fill="none"
-            stroke={socColor}
-            strokeWidth="14"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={offset}
-            initial={{ strokeDashoffset: circumference }}
-            animate={{ strokeDashoffset: offset }}
-            transition={{ duration: 0.6, ease: 'easeOut' }}
-          />
-        </svg>
-        <div className="value">
-          <div className="text-6xl font-bold tabular-nums tracking-tighter" style={{ color: socColor }}>
-            {soc.toFixed(0)}
-          </div>
-          <div className="text-sm font-medium text-[var(--sp-text-muted)] -mt-1">SOC %</div>
-        </div>
-      </div>
-    );
-  };
-
-  // ---------------------- RENDER ----------------------
-
-  // CONNECTION / ONBOARDING SCREEN
+  // ---------------------- CONNECTION SCREEN ----------------------
   if (!isConnected) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-[var(--sp-bg)]">
+      <div className="min-h-screen flex flex-col items-center justify-center px-6 bg-[#0b0c0f] text-white">
         <Toaster position="top-center" richColors closeButton />
 
-        <div className="w-full max-w-sm text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[var(--sp-primary)] mb-4">
-            <Power className="w-9 h-9 text-white" />
-          </div>
-          <h1 className="text-4xl font-semibold tracking-tight text-[var(--sp-text)]">SitePulse</h1>
-          <p className="text-lg text-[var(--sp-text-muted)] mt-1">Hybrid Job-Site Power</p>
-          <p className="text-sm text-[var(--sp-text-subtle)] mt-2">Real-time control from anywhere on site</p>
+        {/* Wordmark — quiet, expensive, technical */}
+        <div className="text-center mb-16">
+          <div className="text-[11px] tracking-[3px] text-[#52525b] font-medium mb-2">HYBRID POWER SYSTEM</div>
+          <div className="text-[42px] font-semibold tracking-[-2.2px] text-white">SITEPULSE</div>
+          <div className="text-[#52525b] text-sm mt-1 tracking-wide">Controller Interface</div>
         </div>
 
-        <div className="w-full max-w-sm space-y-4">
-          <div className="card">
-            <div className="text-sm font-semibold mb-3 text-[var(--sp-text-muted)]">CONNECT TO CONTROLLER</div>
-            
-            <input
-              type="text"
-              className="input mb-3 font-mono text-sm"
-              placeholder="https://your-site.ngrok.io"
-              value={controllerUrl}
-              onChange={(e) => setControllerUrl(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && connect(controllerUrl)}
-            />
+        <div className="w-full max-w-[320px] space-y-3">
+          {/* Primary action — Demo (most people will use this first) */}
+          <button
+            onClick={() => connect('', true)}
+            disabled={isLoading}
+            className="btn btn-primary w-full text-base disabled:opacity-70"
+          >
+            Launch Demo Environment
+          </button>
 
-            <button
-              onClick={() => connect(controllerUrl)}
-              disabled={isLoading}
-              className="btn-primary w-full disabled:opacity-60"
-            >
-              {isLoading ? 'Connecting…' : 'Connect to Controller'}
-            </button>
+          {/* Secondary — real hardware */}
+          <button
+            onClick={() => setShowHardwareInput(!showHardwareInput)}
+            className="btn btn-secondary w-full text-base"
+          >
+            Connect to Hardware
+          </button>
 
-            <div className="text-center my-3 text-xs text-[var(--sp-text-subtle)]">or</div>
-
-            <button
-              onClick={() => connect('', true)}
-              disabled={isLoading}
-              className="btn-secondary w-full flex items-center justify-center gap-2"
-            >
-              <Battery className="w-4 h-4" /> Launch Demo Mode
-            </button>
-          </div>
-
-          <div className="text-[10px] text-center text-[var(--sp-text-subtle)] leading-snug px-4">
-            Demo Mode shows realistic live battery + inverter data.<br />
-            In production you will enter the ngrok (or custom domain) URL shown on your Raspberry Pi.
-          </div>
+          {/* Elegant URL input — only appears when needed */}
+          <AnimatePresence>
+            {showHardwareInput && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="pt-2 space-y-3"
+              >
+                <input
+                  type="text"
+                  className="input text-sm"
+                  placeholder="https://xxxx.ngrok.io"
+                  value={controllerUrl}
+                  onChange={(e) => setControllerUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && connect(controllerUrl)}
+                  autoFocus
+                />
+                <button
+                  onClick={() => connect(controllerUrl)}
+                  disabled={isLoading || !controllerUrl.trim()}
+                  className="btn btn-primary w-full disabled:opacity-50"
+                >
+                  {isLoading ? 'Connecting…' : 'Connect to Controller'}
+                </button>
+                <div className="text-center text-[10px] text-[#52525b] pt-1">
+                  Enter the URL shown by ngrok on your Raspberry Pi
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
-        <div className="mt-auto pt-8 text-[10px] text-[var(--sp-text-subtle)]">
-          v1.0 • Phase 1 (Battery + Inverter) • Matches Controller Spec
+        <div className="absolute bottom-8 text-[10px] text-[#3f4046] tracking-widest">
+          v1.0  •  PHASE 1  •  BATTERY + INVERTER
         </div>
       </div>
     );
   }
 
-  // MAIN DASHBOARD
+  // ---------------------- DASHBOARD ----------------------
   if (!status) {
-    return <div className="min-h-screen flex items-center justify-center">Loading system status...</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0b0c0f] text-[#52525b] text-sm tracking-widest">
+        CONNECTING TO CONTROLLER
+      </div>
+    );
   }
 
-  const isCharging = status.system_mode === 'charging';
-  const currentDirection = status.battery_current >= 0 ? 'discharging' : 'charging';
-
   return (
-    <div className="min-h-screen pb-8 bg-[var(--sp-bg)]">
+    <div className="min-h-screen bg-[#0b0c0f] text-white pb-10">
       <Toaster position="top-center" richColors closeButton />
 
-      {/* Top connection bar */}
-      <div className="connection-banner px-5 py-3 flex items-center justify-between text-sm sticky top-0 z-50">
-        <div className="flex items-center gap-2.5">
-          {isDemoMode ? (
-            <WifiOff className="w-4 h-4" />
-          ) : (
-            <Wifi className="w-4 h-4" />
-          )}
-          <div>
-            <div className="font-semibold tracking-tight">SitePulse Controller</div>
-            <div className="text-[10px] opacity-80 -mt-0.5 font-mono truncate max-w-[180px]">
-              {isDemoMode ? 'DEMO — simulated hardware' : controllerUrl.replace(/^https?:\/\//, '')}
-            </div>
-          </div>
+      {/* Ultra-minimal top bar */}
+      <div className="topbar">
+        <div>
+          <span className="title">SITEPULSE</span>
+          {isDemoMode && <span className="ml-2 text-[10px] px-2 py-px bg-[#1f222a] rounded text-[#52525b]">DEMO</span>}
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className={`status-dot ${status.battery_soc < 20 ? 'danger' : status.battery_soc < 45 ? 'warning' : ''}`} />
-          <button
-            onClick={refresh}
-            disabled={isLoading}
-            className="p-2 rounded-full hover:bg-white/10 active:bg-white/20 transition"
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+        <div className="flex items-center gap-4 text-sm">
+          <div className="status">
+            <div className={`status-dot ${isLowSoc ? 'danger' : ''}`} />
+            <span>{isDemoMode ? 'Simulated' : 'Live'}</span>
+          </div>
+
+          <button onClick={refresh} disabled={isLoading} className="p-1 -mr-1 active:opacity-60 transition">
+            <RefreshCw className={`w-4 h-4 text-[#52525b] ${isLoading ? 'animate-spin' : ''}`} />
           </button>
+
           <button
-            onClick={() => {
-              setIsConnected(false);
-              setStatus(null);
-              setControllerUrl('');
-            }}
-            className="p-2 rounded-full hover:bg-white/10 active:bg-white/20 transition"
-            title="Disconnect"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
-      {/* Demo banner */}
-      <AnimatePresence>
-        {isDemoMode && (
-          <div className="bg-amber-100 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 text-xs px-4 py-2 flex items-center gap-2 border-b border-amber-200 dark:border-amber-900">
-            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
-            <span>Demo mode — data is simulated in real time. Connect a real controller to control live hardware.</span>
-          </div>
-        )}
-      </AnimatePresence>
-
-      <div className="p-5 space-y-5 max-w-[480px] mx-auto">
-        {/* BATTERY SECTION */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <Battery className="w-5 h-5 text-[var(--sp-primary)]" />
-              <div className="font-semibold tracking-tight">Battery Bank</div>
-            </div>
-            <div className="text-xs px-3 py-0.5 rounded-full font-medium" 
-                 style={{ background: `${socColor}20`, color: socColor }}>
-              {isCharging ? 'CHARGING' : currentDirection.toUpperCase()}
-            </div>
-          </div>
-
-          {renderSOCGauge(status.battery_soc)}
-
-          <div className="grid grid-cols-3 gap-3 mt-6 text-center">
-            <div>
-              <div className="text-xs text-[var(--sp-text-subtle)]">VOLTAGE</div>
-              <div className="metric-value text-2xl font-semibold tabular-nums mt-0.5">
-                {status.battery_voltage.toFixed(1)}
-                <span className="text-xs font-normal ml-0.5 text-[var(--sp-text-subtle)]">V</span>
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-[var(--sp-text-subtle)]">CURRENT</div>
-              <div className="metric-value text-2xl font-semibold tabular-nums mt-0.5" 
-                   style={{ color: status.battery_current < 0 ? 'var(--sp-success)' : undefined }}>
-                {status.battery_current > 0 ? '+' : ''}{status.battery_current.toFixed(1)}
-                <span className="text-xs font-normal ml-0.5 text-[var(--sp-text-subtle)]">A</span>
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-[var(--sp-text-subtle)]">TEMP</div>
-              <div className="metric-value text-2xl font-semibold tabular-nums mt-0.5">
-                {status.battery_temp.toFixed(1)}
-                <span className="text-xs font-normal ml-0.5 text-[var(--sp-text-subtle)]">°C</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* INVERTER / POWER SECTION */}
-        <div className="card">
-          <div className="flex items-center gap-2 mb-3">
-            <Zap className="w-5 h-5 text-[var(--sp-accent)]" />
-            <div className="font-semibold tracking-tight">Inverter Output</div>
-          </div>
-
-          <div className="flex items-baseline gap-1 mb-1">
-            <div className="power-value text-[var(--sp-text)]">{status.inverter_power}</div>
-            <div className="text-xl font-medium text-[var(--sp-text-muted)]">W</div>
-          </div>
-
-          <div className="text-sm text-[var(--sp-text-muted)] mb-4">
-            {status.inverter_voltage.toFixed(0)} V • {status.inverter_frequency.toFixed(1)} Hz
-          </div>
-
-          {/* Load percentage bar */}
-          <div>
-            <div className="flex justify-between text-xs mb-1.5 text-[var(--sp-text-muted)]">
-              <div>LOAD</div>
-              <div className="tabular-nums font-medium">{status.inverter_load_percent.toFixed(0)}%</div>
-            </div>
-            <div className="h-3 bg-[var(--sp-border)] rounded-full overflow-hidden">
-              <motion.div
-                className="h-full rounded-full"
-                style={{ background: status.inverter_load_percent > 85 ? 'var(--sp-danger)' : 'var(--sp-primary)' }}
-                initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, status.inverter_load_percent)}%` }}
-                transition={{ duration: 0.5 }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* OUTLETS CONTROL - the most important field feature */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Power className="w-5 h-5 text-[var(--sp-accent)]" />
-              <div className="font-semibold tracking-tight">AC Outlets</div>
-            </div>
-            <div className="text-xs text-[var(--sp-text-subtle)]">6 channels • relay controlled</div>
-          </div>
-
-          <div className="divide-y divide-[var(--sp-border)]">
-            {DEFAULT_OUTLETS.map((outlet) => {
-              const isOn = status.outlets[outlet.id] ?? false;
-              return (
-                <div key={outlet.id} className="outlet-row">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${isOn ? 'bg-[var(--sp-primary)]/10' : 'bg-[var(--sp-border)]'}`}>
-                      <Power className={`w-4 h-4 ${isOn ? 'text-[var(--sp-primary)]' : 'text-[var(--sp-text-subtle)]'}`} />
-                    </div>
-                    <div>
-                      <div className="font-medium">{outlet.name}</div>
-                      <div className="text-[10px] text-[var(--sp-text-subtle)]">Channel {outlet.id}</div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => toggleOutlet(outlet.id, !isOn)}
-                    disabled={isLoading}
-                    className={`outlet-toggle ${isOn ? 'active' : ''}`}
-                    aria-label={`Toggle ${outlet.name}`}
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="mt-4 text-[10px] text-center text-[var(--sp-text-subtle)]">
-            Toggles send real-time commands to the Raspberry Pi GPIO relays
-          </div>
-        </div>
-
-        {/* SYSTEM FOOTER */}
-        <div className="flex items-center justify-between text-xs px-1 text-[var(--sp-text-subtle)]">
-          <div className="flex items-center gap-1.5">
-            <Clock className="w-3.5 h-3.5" />
-            <span>
-              Updated {lastSync ? formatDistanceToNow(lastSync, { addSuffix: true }) : 'just now'}
-            </span>
-          </div>
-          <div className="font-mono text-[10px]">{status.system_mode.replace('_', ' ')}</div>
-        </div>
-
-        {/* Footer info */}
-        <div className="text-center pt-4">
-          <button 
             onClick={() => {
               localStorage.removeItem('sitepulse_last_url');
               setIsConnected(false);
               setStatus(null);
+              setControllerUrl('');
             }}
-            className="text-xs text-[var(--sp-text-subtle)] hover:text-[var(--sp-text-muted)] underline-offset-2 hover:underline"
+            className="p-1 -mr-1 active:opacity-60 transition"
           >
-            Disconnect &amp; change controller
+            <Settings className="w-4 h-4 text-[#52525b]" />
           </button>
         </div>
+      </div>
+
+      {/* BATTERY — the hero section */}
+      <div className="section pt-8">
+        <div className="text-label mb-3 tracking-[1px]">BATTERY BANK</div>
+
+        {/* Enormous, calm SOC number */}
+        <div className="flex items-baseline gap-1">
+          <div 
+            className="text-hero tabular-nums tracking-[-3.5px]" 
+            style={{ color: socColor }}
+          >
+            {status.battery_soc.toFixed(0)}
+          </div>
+          <div className="text-2xl text-[#52525b] font-medium pb-2">%</div>
+        </div>
+
+        {/* Thin, elegant progress bar */}
+        <div className={`progress mt-4 mb-7 ${isLowSoc ? 'danger' : ''}`}>
+          <div 
+            className="progress-bar" 
+            style={{ 
+              width: `${Math.max(2, status.battery_soc)}%`,
+              background: socColor 
+            }} 
+          />
+        </div>
+
+        {/* Three precise metrics — generous breathing room */}
+        <div className="grid grid-cols-3 gap-px bg-[#1a1c22] rounded-xl overflow-hidden">
+          <div className="bg-[#14151a] px-5 py-4 text-center">
+            <div className="text-label mb-1">VOLTAGE</div>
+            <div className="text-metric tabular-nums tracking-[-1px]">{status.battery_voltage.toFixed(1)}</div>
+            <div className="text-[11px] text-[#52525b] -mt-0.5">V DC</div>
+          </div>
+          <div className="bg-[#14151a] px-5 py-4 text-center">
+            <div className="text-label mb-1">CURRENT</div>
+            <div 
+              className="text-metric tabular-nums tracking-[-1px]" 
+              style={{ color: status.battery_current < 0 ? 'var(--sp-success)' : undefined }}
+            >
+              {status.battery_current > 0 ? '+' : ''}{status.battery_current.toFixed(1)}
+            </div>
+            <div className="text-[11px] text-[#52525b] -mt-0.5">A</div>
+          </div>
+          <div className="bg-[#14151a] px-5 py-4 text-center">
+            <div className="text-label mb-1">TEMP</div>
+            <div className="text-metric tabular-nums tracking-[-1px]">{status.battery_temp.toFixed(1)}</div>
+            <div className="text-[11px] text-[#52525b] -mt-0.5">°C</div>
+          </div>
+        </div>
+
+        {/* Charging / discharging state — very subtle */}
+        <div className="mt-3 text-center">
+          <span className="text-xs tracking-[1px] text-[#52525b]">
+            {isCharging ? 'CHARGING' : status.battery_current >= 0 ? 'DISCHARGING' : 'CHARGING'}
+          </span>
+        </div>
+      </div>
+
+      {/* INVERTER OUTPUT — second most important metric */}
+      <div className="section">
+        <div className="text-label mb-2 tracking-[1px]">INVERTER OUTPUT</div>
+
+        <div className="flex items-baseline">
+          <div className="text-hero tabular-nums tracking-[-2.8px]">{status.inverter_power}</div>
+          <div className="text-3xl text-[#52525b] font-medium pb-1 ml-1">W</div>
+        </div>
+
+        <div className="text-sm text-[#52525b] mt-0.5">
+          {status.inverter_voltage.toFixed(0)} V  ·  {status.inverter_frequency.toFixed(2)} Hz
+        </div>
+
+        {/* Load — thin and quiet */}
+        <div className="mt-6">
+          <div className="flex items-center justify-between text-xs text-[#52525b] mb-1.5">
+            <div>LOAD</div>
+            <div className="tabular-nums">{status.inverter_load_percent.toFixed(0)}%</div>
+          </div>
+          <div className={`progress ${status.inverter_load_percent > 85 ? 'danger' : ''}`}>
+            <div 
+              className="progress-bar" 
+              style={{ 
+                width: `${status.inverter_load_percent}%`,
+                background: status.inverter_load_percent > 85 ? 'var(--sp-danger)' : 'var(--sp-accent)'
+              }} 
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* OUTLETS — clean, authoritative list */}
+      <div className="section">
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="text-label tracking-[1px]">AC OUTLETS</div>
+          <div className="text-[10px] text-[#52525b]">6 RELAY CHANNELS</div>
+        </div>
+
+        <div className="surface rounded-2xl px-5 divide-y divide-[var(--sp-border)]">
+          {DEFAULT_OUTLETS.map((outlet) => {
+            const isOn = status.outlets[outlet.id] ?? false;
+            return (
+              <div key={outlet.id} className="outlet">
+                <div>
+                  <div className="label">{outlet.name}</div>
+                  <div className="meta">Channel {outlet.id}</div>
+                </div>
+
+                <button
+                  onClick={() => toggleOutlet(outlet.id, !isOn)}
+                  disabled={isLoading}
+                  className={`switch ${isOn ? 'active' : ''}`}
+                  aria-label={`Toggle ${outlet.name}`}
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="text-center text-[10px] text-[#3f4046] mt-4 tracking-widest">
+          COMMANDS SENT TO RASPBERRY PI GPIO
+        </div>
+      </div>
+
+      {/* Footer status — calm and minimal */}
+      <div className="px-6 pt-4 text-center">
+        <button
+          onClick={() => {
+            localStorage.removeItem('sitepulse_last_url');
+            setIsConnected(false);
+            setStatus(null);
+          }}
+          className="text-[#3f4046] text-xs tracking-widest active:text-[#52525b] transition-colors"
+        >
+          DISCONNECT CONTROLLER
+        </button>
       </div>
     </div>
   );
