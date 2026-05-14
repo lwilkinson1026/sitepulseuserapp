@@ -1,0 +1,228 @@
+@import "tailwindcss";
+
+/* SitePulse User App - Mobile-first design system for construction site hybrid power control */
+:root {
+  /* Brand colors - Teal for reliable power + Orange for construction/high visibility */
+  --sp-primary: #0f766e;       /* teal-700 - main brand, eco/hybrid */
+  --sp-primary-dark: #0d5c57;
+  --sp-accent: #ea580c;        /* orange-600 - alerts, active power, construction */
+  --sp-accent-light: #f97316;  /* orange-500 */
+  --sp-success: #16a34a;       /* green-600 - good SOC, charging */
+  --sp-warning: #ca8a04;       /* yellow-600 - medium SOC */
+  --sp-danger: #dc2626;        /* red-600 - low SOC, errors */
+  
+  /* Neutral slate palette optimized for outdoor/field use (high contrast) */
+  --sp-bg: #f8fafc;            /* slate-50 - light background */
+  --sp-bg-card: #ffffff;
+  --sp-border: #e2e8f0;
+  --sp-text: #0f172a;          /* slate-900 */
+  --sp-text-muted: #475569;    /* slate-600 */
+  --sp-text-subtle: #94a3b8;   /* slate-400 */
+  
+  /* Dark mode - better for bright job sites / night work */
+  --sp-bg-dark: #0f172a;
+  --sp-bg-card-dark: #1e293b;
+  --sp-border-dark: #334155;
+  --sp-text-dark: #f1f5f9;
+  --sp-text-muted-dark: #94a3b8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sp-bg: var(--sp-bg-dark);
+    --sp-bg-card: var(--sp-bg-card-dark);
+    --sp-border: var(--sp-border-dark);
+    --sp-text: var(--sp-text-dark);
+    --sp-text-muted: var(--sp-text-muted-dark);
+    --sp-text-subtle: #64748b;
+  }
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--sp-bg);
+  color: var(--sp-text);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Mobile-first container - perfect for phones in the field */
+#root {
+  min-height: 100svh;
+  max-width: 480px;
+  margin: 0 auto;
+  background: var(--sp-bg);
+  box-shadow: 0 0 0 1px var(--sp-border);
+}
+
+/* Card styling - elevated surfaces for dashboard */
+.card {
+  background: var(--sp-bg-card);
+  border: 1px solid var(--sp-border);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* Large, touch-friendly toggle switches for outlets */
+.outlet-toggle {
+  position: relative;
+  width: 64px;
+  height: 36px;
+  background: #cbd5e1;
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+}
+
+.outlet-toggle.active {
+  background: var(--sp-primary);
+}
+
+.outlet-toggle::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 28px;
+  height: 28px;
+  background: white;
+  border-radius: 9999px;
+  transition: transform 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.outlet-toggle.active::after {
+  transform: translateX(28px);
+}
+
+/* SOC Gauge - circular progress */
+.soc-gauge {
+  position: relative;
+  width: 180px;
+  height: 180px;
+}
+
+.soc-gauge svg {
+  transform: rotate(-90deg);
+}
+
+.soc-gauge .value {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+/* Status indicator dot */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--sp-success);
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.status-dot.warning { background: var(--sp-warning); }
+.status-dot.danger { background: var(--sp-danger); }
+
+/* Metric value styling */
+.metric-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Large primary action buttons */
+.btn-primary {
+  background: var(--sp-primary);
+  color: white;
+  font-weight: 600;
+  padding: 14px 24px;
+  border-radius: 12px;
+  font-size: 16px;
+  transition: all 0.1s ease;
+  min-height: 52px; /* Excellent touch target */
+}
+
+.btn-primary:active {
+  background: var(--sp-primary-dark);
+  transform: scale(0.985);
+}
+
+.btn-secondary {
+  background: var(--sp-bg-card);
+  color: var(--sp-text);
+  font-weight: 600;
+  padding: 14px 24px;
+  border-radius: 12px;
+  border: 1px solid var(--sp-border);
+  font-size: 16px;
+  min-height: 52px;
+}
+
+.btn-danger {
+  background: var(--sp-danger);
+  color: white;
+  font-weight: 600;
+  padding: 12px 20px;
+  border-radius: 12px;
+}
+
+/* Input fields - large and readable on site */
+.input {
+  width: 100%;
+  padding: 14px 16px;
+  font-size: 16px;
+  border: 2px solid var(--sp-border);
+  border-radius: 12px;
+  background: var(--sp-bg-card);
+  color: var(--sp-text);
+  transition: border-color 0.15s ease;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--sp-primary);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+}
+
+/* Outlet row */
+.outlet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--sp-border);
+}
+
+.outlet-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.outlet-row:first-child {
+  padding-top: 0;
+}
+
+/* Power value with unit */
+.power-value {
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1.5px;
+}
+
+/* For the connection status banner */
+.connection-banner {
+  background: linear-gradient(90deg, #0f766e, #134e4b);
+  color: white;
+}

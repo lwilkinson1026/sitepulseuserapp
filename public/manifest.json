@@ -1,0 +1,19 @@
+{
+  "name": "SitePulse",
+  "short_name": "SitePulse",
+  "description": "Hybrid Job-Site Power Control — Real-time battery SOC, inverter monitoring and remote outlet control",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f766e",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities", "business"]
+}
