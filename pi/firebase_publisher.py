@@ -69,6 +69,10 @@ class BMSState:
         self.v_tot = 0.0
         self.v_charge = 0.0
         self.i_in = 0.0
+        # Harmony emits zero-valued 0x27 frames as "no fresh measurement"
+        # between real readings. Hold the last non-zero value until we see
+        # enough consecutive zeros to call it true idle.
+        self.i_in_zero_streak = 0
         self.soc = 0.0          # 0.0 - 1.0 ratio
         self.soh = 0.0
         self.t_ic = 0.0
@@ -109,7 +113,14 @@ def decode_frame(arb_id: int, data: bytes) -> None:
         # only in bytes 4-7 (i_in_ic). No direction bit yet, so assume
         # discharge (negative) by default — flip once we wire charger detection.
         i_in_ic = _f32_be(data, 4)
-        state.i_in = -i_in_ic
+        if abs(i_in_ic) >= 0.5:
+            state.i_in = -i_in_ic
+            state.i_in_zero_streak = 0
+        else:
+            state.i_in_zero_streak += 1
+            # After ~10 consecutive zero frames, accept true idle.
+            if state.i_in_zero_streak >= 10:
+                state.i_in = 0.0
 
     elif pkt_type == PKT_V_CELL and len(data) >= 4:
         cell_num = data[0]

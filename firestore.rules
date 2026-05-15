@@ -1,0 +1,84 @@
+rules_version = '2';
+
+// SitePulse Firestore security rules.
+//
+// Ownership model (spec §6): a unit has at most one owner. The Pi authenticates
+// with a service-account key via the Admin SDK, which bypasses these rules
+// entirely — so the rules only need to constrain *client* (mobile app) access.
+//
+// Service-account writes are what get telemetry into Firestore and consume
+// pending commands. Client writes are limited to issuing commands and
+// updating user profile data; everything authoritative is server-enforced.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── helpers ────────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwnerOf(unitId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/units/$(unitId))
+        && get(/databases/$(database)/documents/units/$(unitId)).data.ownerId == request.auth.uid;
+    }
+
+    // ── user profiles ──────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ── units ──────────────────────────────────────────────────────────────
+    // The root unit doc holds ownership + metadata. Client reads only when
+    // they are the owner. Client never writes — claim/release go through
+    // Cloud Functions; lastSeen + telemetry come from the Pi.
+    match /units/{unitId} {
+      allow read: if isOwnerOf(unitId);
+      allow write: if false;
+
+      // Live telemetry. Read-only for the owner; written by the Pi.
+      match /current/{doc} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
+      // Hourly rollups for history charts.
+      match /history/{ts} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
+      // Commands. Owner can create + read + cancel their own intents.
+      // The Pi ACKs by writing the status field; the client must not edit it.
+      match /commands/{cmdId} {
+        allow read: if isOwnerOf(unitId);
+        allow create: if isOwnerOf(unitId)
+                     && request.resource.data.issuedBy == request.auth.uid
+                     && request.resource.data.status == 'pending';
+        allow update: if false;    // only the Pi updates status
+        allow delete: if isOwnerOf(unitId)
+                     && resource.data.status == 'pending';
+      }
+
+      // Append-only event log.
+      match /events/{evtId} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
+      // Roles (phase 2 — multi-user per unit). Owner manages members.
+      match /members/{memberUid} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if isOwnerOf(unitId);
+      }
+    }
+
+    // ── claim tokens ───────────────────────────────────────────────────────
+    // Pre-provisioned at manufacture, consumed atomically by claimUnit.
+    // No client access — only the Cloud Function (via Admin SDK) reads/writes.
+    match /claimTokens/{tokenHash} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,7 +1,31 @@
 import React from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+
+// On web, expo-font's runtime registration isn't reliably picking up
+// the bundled Inter / JetBrains Mono assets, so we side-load Google Fonts
+// and alias them to the Expo key names. Native builds are unaffected.
+if (Platform.OS === 'web' && typeof document !== 'undefined') {
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href =
+    'https://fonts.googleapis.com/css2?' +
+    'family=Inter:wght@400;500;600;900&' +
+    'family=JetBrains+Mono:wght@400;500&display=swap';
+  document.head.appendChild(link);
+
+  const style = document.createElement('style');
+  style.textContent = `
+    @font-face { font-family: 'Inter_400Regular';  src: local('Inter'); font-weight: 400; }
+    @font-face { font-family: 'Inter_500Medium';   src: local('Inter'); font-weight: 500; }
+    @font-face { font-family: 'Inter_600SemiBold'; src: local('Inter'); font-weight: 600; }
+    @font-face { font-family: 'Inter_900Black';    src: local('Inter'); font-weight: 900; }
+    @font-face { font-family: 'JetBrainsMono_400Regular'; src: local('JetBrains Mono'); font-weight: 400; }
+    @font-face { font-family: 'JetBrainsMono_500Medium';  src: local('JetBrains Mono'); font-weight: 500; }
+  `;
+  document.head.appendChild(style);
+}
 import {
   Inter_400Regular,
   Inter_500Medium,

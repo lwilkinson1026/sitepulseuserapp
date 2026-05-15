@@ -26,6 +26,12 @@ android/
 .env.local
 .env.*.local
 
+# Service-account credentials — NEVER commit
+scripts/service-account.json
+**/service-account*.json
+**/*-service-account.json
+**/firebase-adminsdk-*.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

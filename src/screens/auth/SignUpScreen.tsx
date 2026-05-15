@@ -3,6 +3,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -40,16 +41,20 @@ export function SignUpScreen({ navigation }: Props) {
   }
 
   return (
-    <Screen>
+    <Screen edges={['top', 'bottom', 'left', 'right']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.flex}
       >
-        <View style={styles.header}>
-          <Eyebrow parts={['01 / Create account']} />
-        </View>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.header}>
+            <Eyebrow parts={['01 / Create account']} />
+          </View>
 
-        <View style={styles.body}>
           <Text style={styles.headline}>Claim{'\n'}the unit.</Text>
 
           <View style={styles.fields}>
@@ -75,13 +80,12 @@ export function SignUpScreen({ navigation }: Props) {
           <View style={styles.cta}>
             <PrimaryCTA label={busy ? 'Creating…' : 'Create account'} onPress={onSubmit} disabled={busy} />
           </View>
-
-          <Pressable onPress={() => navigation.navigate('SignIn')} style={styles.altLink}>
-            <Text style={styles.altText}>HAVE AN ACCOUNT  ·  SIGN IN  →</Text>
-          </Pressable>
-        </View>
+        </ScrollView>
 
         <View style={styles.footer}>
+          <Pressable onPress={() => navigation.navigate('SignIn')} hitSlop={12}>
+            <Text style={styles.altText}>HAVE AN ACCOUNT  ·  SIGN IN  →</Text>
+          </Pressable>
           <FigCaption number={1} label="Create account" detail="v0.1 scaffold" />
         </View>
       </KeyboardAvoidingView>
@@ -95,6 +99,8 @@ function Field(props: React.ComponentProps<typeof TextInput> & { label: string }
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <TextInput
+        autoCorrect={false}
+        spellCheck={false}
         {...rest}
         placeholderTextColor={colors.textMuted}
         style={[styles.field, style]}
@@ -105,11 +111,13 @@ function Field(props: React.ComponentProps<typeof TextInput> & { label: string }
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  scroll: {
+    paddingBottom: spacing.lg,
+  },
   header: {
     paddingTop: spacing.md,
     paddingBottom: spacing.lg,
   },
-  body: { flex: 1 },
   headline: {
     color: colors.textDisplay,
     fontFamily: fonts.display,
@@ -145,12 +153,17 @@ const styles = StyleSheet.create({
     letterSpacing: tracking.monoCaps,
   },
   cta: { marginTop: spacing.xl },
-  altLink: { marginTop: spacing.lg },
   altText: {
     color: colors.textBody,
     fontFamily: fonts.mono,
     fontSize: typeScale.monoLG,
     letterSpacing: tracking.monoCaps,
   },
-  footer: { paddingVertical: spacing.md },
+  footer: {
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+    gap: spacing.md,
+    borderTopWidth: hairline,
+    borderTopColor: colors.borderHairline,
+  },
 });

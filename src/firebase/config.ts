@@ -5,9 +5,12 @@
 // per spec §11 Phase 0. For now we read from process.env and fall back
 // to placeholders so the build stays green during the design-system pass.
 
+import { Platform } from 'react-native';
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
-import { getAuth, Auth } from 'firebase/auth';
+// @ts-expect-error — getReactNativePersistence is exported but missing from the .d.ts in firebase 12.x
+import { getAuth, initializeAuth, getReactNativePersistence, Auth } from 'firebase/auth';
 import { getFirestore, Firestore } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY ?? 'placeholder-api-key',
@@ -25,10 +28,18 @@ let db: Firestore;
 export function ensureFirebase() {
   if (getApps().length === 0) {
     app = initializeApp(firebaseConfig);
+    if (Platform.OS === 'web') {
+      // Web build uses the default IndexedDB persistence; getReactNativePersistence isn't exported.
+      auth = getAuth(app);
+    } else {
+      auth = initializeAuth(app, {
+        persistence: getReactNativePersistence(AsyncStorage),
+      });
+    }
   } else {
     app = getApp();
+    auth = getAuth(app);
   }
-  auth = getAuth(app);
   db = getFirestore(app);
   return { app, auth, db };
 }

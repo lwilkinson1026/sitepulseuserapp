@@ -1,46 +1,60 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DashboardScreen } from '../screens/tabs/DashboardScreen';
 import { OutletsScreen } from '../screens/tabs/OutletsScreen';
 import { ScheduleScreen } from '../screens/tabs/ScheduleScreen';
 import { ActivityScreen } from '../screens/tabs/ActivityScreen';
-import { colors, fonts, hairline, tracking, typeScale } from '../theme';
+import { colors, fonts, hairline } from '../theme';
 import { MainTabsParamList } from './types';
 
 const Tab = createBottomTabNavigator<MainTabsParamList>();
 
 // Tab labels follow the "01 / DASHBOARD" pattern from spec §10.3, lifted
 // directly from the marketing site's "01 / BATTERY · 02 / CONNECTIVITY · …".
+// We stack the section number above the label so the full word fits at a
+// readable size — no mid-word truncation, no eye-straining 9-pt micro type.
 
-const TAB_LABELS: Record<keyof MainTabsParamList, string> = {
-  Dashboard: '01 / DASHBOARD',
-  Outlets: '02 / OUTLETS',
-  Schedule: '03 / SCHEDULE',
-  Activity: '04 / ACTIVITY',
+const TAB_LABELS: Record<keyof MainTabsParamList, { num: string; label: string }> = {
+  Dashboard: { num: '01', label: 'DASHBOARD' },
+  Outlets:   { num: '02', label: 'OUTLETS' },
+  Schedule:  { num: '03', label: 'SCHEDULE' },
+  Activity:  { num: '04', label: 'ACTIVITY' },
 };
 
 function TabLabel({ routeName, focused }: { routeName: keyof MainTabsParamList; focused: boolean }) {
+  const { num, label } = TAB_LABELS[routeName];
   return (
-    <Text
-      style={[
-        styles.tabLabel,
-        focused ? styles.tabLabelFocused : null,
-      ]}
-      numberOfLines={1}
-    >
-      {TAB_LABELS[routeName]}
-    </Text>
+    <View style={styles.tabLabelCol}>
+      <Text
+        style={[styles.tabNum, focused ? styles.tabNumFocused : null]}
+        numberOfLines={1}
+      >
+        {num}
+      </Text>
+      <Text
+        style={[styles.tabLabel, focused ? styles.tabLabelFocused : null]}
+        numberOfLines={1}
+      >
+        {label}
+      </Text>
+    </View>
   );
 }
 
 export function MainTabs() {
+  // Respect the home-indicator safe area so labels aren't clipped on
+  // notched iPhones and the touch target sits above the system gesture bar.
+  const insets = useSafeAreaInsets();
+  const bottomInset = Math.max(insets.bottom, 8);
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarShowLabel: true,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [styles.tabBar, { height: 64 + bottomInset, paddingBottom: bottomInset }],
         tabBarItemStyle: styles.tabItem,
         tabBarIcon: () => null,
         tabBarLabel: ({ focused }) => (
@@ -62,23 +76,33 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     borderTopWidth: hairline,
     borderTopColor: colors.borderHairline,
-    height: 64,
-    paddingTop: 6,
-    paddingBottom: 8,
+    paddingTop: 10,
+    paddingHorizontal: 0,
   },
   tabItem: {
     paddingVertical: 0,
+    paddingHorizontal: 2,
+  },
+  tabLabelCol: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  tabNum: {
+    fontFamily: fonts.mono,
+    fontSize: 10,
+    letterSpacing: 1,
+    color: colors.textMuted,
+  },
+  tabNumFocused: {
+    color: colors.textBody,
   },
   tabLabel: {
     fontFamily: fonts.mono,
-    fontSize: typeScale.monoSM,
-    letterSpacing: tracking.monoCaps,
+    fontSize: 12,
+    letterSpacing: 1,
     color: colors.textMuted,
   },
   tabLabelFocused: {
     color: colors.textDisplay,
   },
-  unused: {
-    display: 'none',
-  } as View['props'],
 });

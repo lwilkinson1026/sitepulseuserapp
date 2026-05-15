@@ -54,7 +54,6 @@ function Bracket({
 
   return (
     <View
-      pointerEvents="none"
       style={[
         styles.bracket,
         { width: size, height: size },
@@ -73,5 +72,6 @@ const styles = StyleSheet.create({
   },
   bracket: {
     position: 'absolute',
+    pointerEvents: 'none',
   },
 });
