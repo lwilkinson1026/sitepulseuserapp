@@ -7,6 +7,7 @@ import {
   User,
 } from 'firebase/auth';
 import { ensureFirebase } from '../firebase/config';
+import { usePushTokenRegistration } from './usePushTokenRegistration';
 
 type AuthState = {
   initializing: boolean;          // true until the first onAuthStateChanged fires
@@ -30,6 +31,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     return unsub;
   }, []);
+
+  // Register the device's Expo Push token once the user is signed in.
+  // Hook is a no-op until `user` is non-null; safe to call unconditionally.
+  usePushTokenRegistration(user);
 
   const value = useMemo<AuthState>(
     () => ({

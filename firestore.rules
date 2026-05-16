@@ -27,6 +27,12 @@ service cloud.firestore {
     // ── user profiles ──────────────────────────────────────────────────────
     match /users/{uid} {
       allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+      // Push notification tokens — one doc per device, doc id == token.
+      // Owner-only; the Cloud Function reads them via Admin SDK.
+      match /pushTokens/{token} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
     }
 
     // ── units ──────────────────────────────────────────────────────────────
@@ -38,7 +44,22 @@ service cloud.firestore {
       allow write: if false;
 
       // Live telemetry. Read-only for the owner; written by the Pi.
+      // Covers snapshot + light/sentry/engine/camera state docs.
       match /current/{doc} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
+      // Config docs (light, relays, sentry, charge, camera).
+      // Owner-readable. Mutations go through *.update commands so the Pi
+      // can validate them — never direct writes from the client.
+      match /config/{doc} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
+      // Sentry clip metadata (the MP4 itself lives in Storage rules).
+      match /clips/{clipId} {
         allow read: if isOwnerOf(unitId);
         allow write: if false;
       }
