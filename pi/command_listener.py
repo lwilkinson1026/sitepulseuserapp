@@ -200,8 +200,30 @@ def init_firestore() -> firestore.Client:
     return firestore.client()
 
 
+def _start_background_services(db: firestore.Client) -> None:
+    """
+    Boot the long-running background services that ride alongside the
+    command listener. Each is wrapped so a missing hardware dep (e.g.
+    RPi.GPIO on a Mac dev box) doesn't crash the listener — the failure
+    is logged once and the rest of the dispatch loop stays alive.
+    """
+    services = [
+        ("relays.start_override_watcher", lambda: __import__(
+            "relays", fromlist=["start_override_watcher"]
+        ).start_override_watcher(db, UNIT_ID)),
+    ]
+    for name, starter in services:
+        try:
+            starter()
+            _log(f"started background service: {name}")
+        except Exception as e:
+            _log(f"!!! background service '{name}' failed to start: {e}")
+
+
 def main() -> None:
     db = init_firestore()
+    _start_background_services(db)
+
     query = (
         db.collection(f"units/{UNIT_ID}/commands")
           .where(filter=FieldFilter("status", "==", "pending"))
