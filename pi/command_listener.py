@@ -217,6 +217,9 @@ def _start_background_services(db: firestore.Client) -> None:
         ("sentry.start_sentry", lambda: __import__(
             "sentry", fromlist=["start_sentry"]
         ).start_sentry(db, UNIT_ID)),
+        ("streamer.start_streamer", lambda: __import__(
+            "streamer", fromlist=["start_streamer"]
+        ).start_streamer(db, UNIT_ID)),
     ]
     for name, starter in services:
         try:

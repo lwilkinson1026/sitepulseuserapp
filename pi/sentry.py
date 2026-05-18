@@ -298,6 +298,27 @@ def start_sentry(db: firestore.Client, unit_id: str) -> threading.Thread:
         with state_lock_local:
             running = _capture_thread is not None and _capture_thread.is_alive()
             if enabled and not running:
+                # Camera contention check — Phase D2 streamer also wants
+                # /dev/video0. v1: refuse to arm while live, surface the
+                # reason to the app so the user knows why arming "didn't
+                # take".
+                try:
+                    cam_snap = db.document(
+                        f"units/{unit_id}/current/camera"
+                    ).get()
+                    if cam_snap.exists and cam_snap.get("streaming"):
+                        db.document(f"units/{unit_id}/current/sentry").set({
+                            "armed": False,
+                            "error": "STOP LIVE STREAM TO ARM SENTRY",
+                        }, merge=True)
+                        # Roll the config back so the toggle reflects truth.
+                        db.document(f"units/{unit_id}/config/sentry").set(
+                            {"enabled": False}, merge=True,
+                        )
+                        return
+                except Exception as e:
+                    print(f"[sentry] camera-check failed: {e}", flush=True)
+
                 _stop_flag = threading.Event()
                 config_data = data or {}
 

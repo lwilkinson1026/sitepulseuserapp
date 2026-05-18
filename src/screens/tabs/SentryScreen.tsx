@@ -19,9 +19,10 @@ import {
   armSentry,
   disarmSentry,
   startCameraStream,
+  stopCameraStream,
   updateSentryConfig,
 } from '../../firebase/commands';
-import type { SentryConfig, SentryState } from '../../firebase/types';
+import type { CameraState, SentryConfig, SentryState } from '../../firebase/types';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase D1 — sentry tab.
@@ -44,6 +45,7 @@ export function SentryScreen() {
   const { user } = useAuth();
   const config = useUnitDoc<SentryConfig>(DEV_UNIT_ID, 'config', 'sentry');
   const state = useUnitDoc<SentryState>(DEV_UNIT_ID, 'current', 'sentry');
+  const camera = useUnitDoc<CameraState & { error?: string | null }>(DEV_UNIT_ID, 'current', 'camera');
   const events = useUnitEvents(DEV_UNIT_ID, { kindFilter: 'motion', pageSize: 20 });
 
   const loading = config.loading || state.loading;
@@ -83,6 +85,10 @@ export function SentryScreen() {
 
   const onGoLive = () => {
     void startCameraStream(DEV_UNIT_ID, user.uid);
+  };
+
+  const onStopStream = () => {
+    void stopCameraStream(DEV_UNIT_ID, user.uid);
   };
 
   return (
@@ -179,23 +185,19 @@ export function SentryScreen() {
           />
         </View>
 
-        {/* ── Live stream (D2 placeholder) ───────────────────────────── */}
+        {/* ── Live stream ────────────────────────────────────────────── */}
         <View style={styles.section}>
-          <Eyebrow parts={['Live stream', 'phase D2']} />
-          <View style={styles.streamCard}>
-            <Text style={styles.streamPlaceholder}>
-              STREAMING NOT CONFIGURED
-            </Text>
-            <Text style={styles.streamHint}>
-              PROVISION A CLOUDFLARE STREAM LIVE INPUT, THEN TAP GO LIVE
-            </Text>
-            <Pressable
-              onPress={onGoLive}
-              style={[styles.streamButton, styles.streamButtonDisabled]}
-            >
-              <Text style={styles.streamButtonLabel}>GO LIVE</Text>
-            </Pressable>
-          </View>
+          <Eyebrow
+            parts={['Live stream', camera.data?.streaming ? 'live' : 'idle']}
+            live={!!camera.data?.streaming}
+          />
+          <LiveStreamCard
+            streaming={!!camera.data?.streaming}
+            hlsUrl={camera.data?.hlsUrl ?? null}
+            error={camera.data?.error ?? null}
+            onGoLive={onGoLive}
+            onStop={onStopStream}
+          />
         </View>
 
         {/* ── Motion events ──────────────────────────────────────────── */}
@@ -217,6 +219,61 @@ export function SentryScreen() {
         <FigCaption number={4} label="Sentry" detail={DEV_UNIT_ID} />
       </ScrollView>
     </Screen>
+  );
+}
+
+// ─── live stream card ─────────────────────────────────────────────────────
+
+function LiveStreamCard({
+  streaming,
+  hlsUrl,
+  error,
+  onGoLive,
+  onStop,
+}: {
+  streaming: boolean;
+  hlsUrl: string | null;
+  error: string | null;
+  onGoLive: () => void;
+  onStop: () => void;
+}) {
+  // useVideoPlayer needs a stable source ref; pass empty string when off
+  // so the hook stays mounted but the player has nothing to play.
+  const livePlayer = useVideoPlayer(streaming && hlsUrl ? hlsUrl : '', (p) => {
+    p.loop = false;
+    p.muted = false;
+    if (streaming && hlsUrl) p.play();
+  });
+
+  if (streaming && hlsUrl) {
+    return (
+      <View style={styles.streamCard}>
+        <VideoView
+          player={livePlayer}
+          style={styles.video}
+          allowsFullscreen
+          allowsPictureInPicture
+          nativeControls
+        />
+        <Pressable onPress={onStop} style={styles.streamStopButton}>
+          <Text style={styles.streamStopButtonLabel}>STOP STREAM</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.streamCard}>
+      <Text style={styles.streamPlaceholder}>
+        {error ? error : 'CAMERA IDLE'}
+      </Text>
+      <Text style={styles.streamHint}>
+        TAP GO LIVE TO PUSH FROM THE PI USB WEBCAM TO CLOUDFLARE STREAM
+      </Text>
+      <Pressable onPress={onGoLive} style={styles.streamButton}>
+        <Text style={styles.streamButtonLabel}>GO LIVE</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -381,14 +438,24 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.xl,
-    borderWidth: hairline,
-    borderColor: colors.borderStrong,
-  },
-  streamButtonDisabled: {
-    opacity: 0.4,
+    backgroundColor: colors.textDisplay,
   },
   streamButtonLabel: {
-    color: colors.textDisplay,
+    color: colors.background,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoLG,
+    letterSpacing: tracking.monoCaps,
+  },
+  streamStopButton: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderWidth: hairline,
+    borderColor: colors.danger,
+    alignSelf: 'center',
+  },
+  streamStopButtonLabel: {
+    color: colors.danger,
     fontFamily: fonts.mono,
     fontSize: typeScale.monoLG,
     letterSpacing: tracking.monoCaps,
