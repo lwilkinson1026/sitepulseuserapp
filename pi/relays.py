@@ -301,6 +301,44 @@ def start_override_watcher(db: firestore.Client, unit_id: str) -> threading.Thre
     return _watcher_thread
 
 
+def pulse_light(db: firestore.Client, unit_id: str, duration_s: int) -> None:
+    """Turn the security-light relay on for duration_s seconds, then off.
+    Used by sentry on motion (autoLight + scareMode). Runs in a daemon
+    thread so the caller isn't blocked. Respects the physical override —
+    if the SPST switch is forcing the light on, we don't fight it. After
+    the duration, defers to config/light.mode: if the user has manually
+    set 'on', we leave it on; otherwise we turn it off."""
+    _ensure_initialized()
+
+    def run() -> None:
+        ch = _light_channel(db, unit_id)
+        with _state_lock:
+            if _override_active:
+                return  # hardware switch already controlling
+            _drive(ch, True)
+            _mirror_light(db, unit_id, "sentry")
+            _mirror_relays(db, unit_id, "sentry")
+
+        time.sleep(max(1, duration_s))
+
+        with _state_lock:
+            if _override_active:
+                return
+            # Respect user intent — if config/light.mode is 'on', don't
+            # cut the light off after the pulse.
+            try:
+                snap = db.document(f"units/{unit_id}/config/light").get()
+                mode = (snap.to_dict() or {}).get("mode", "auto") if snap.exists else "auto"
+            except Exception:
+                mode = "auto"
+            if mode != "on":
+                _drive(ch, False)
+                _mirror_light(db, unit_id, "sentry")
+                _mirror_relays(db, unit_id, "sentry")
+
+    threading.Thread(target=run, daemon=True, name="light-pulse").start()
+
+
 def cleanup() -> None:
     """Drive all relays off and release GPIO. Called on shutdown."""
     if not _initialized:

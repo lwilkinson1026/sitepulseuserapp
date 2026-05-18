@@ -130,6 +130,20 @@ def _bucket():
         return storage.bucket(name=bucket_name, app=app)
 
 
+def _light_auto_timeout(db: firestore.Client, unit_id: str) -> int:
+    """Read config/light.autoTimeoutSec, default 90s. Used when autoLight
+    fires (non-scare) so the light follows the user's configured timeout."""
+    try:
+        snap = db.document(f"units/{unit_id}/config/light").get()
+        if snap.exists:
+            t = snap.get("autoTimeoutSec")
+            if isinstance(t, (int, float)):
+                return max(5, int(t))
+    except Exception:
+        pass
+    return 90
+
+
 def _capture_loop(db: firestore.Client, unit_id: str, config: Dict[str, Any]) -> None:
     """Read frames, detect motion, record + upload clips. Returns when
     _stop_flag is set."""
@@ -190,6 +204,32 @@ def _capture_loop(db: firestore.Client, unit_id: str, config: Dict[str, Any]) ->
                     _record_and_upload(cap, cv, bucket, db, unit_id, list(pre_roll), post_sec)
                 except Exception as e:
                     print(f"[sentry] record/upload failed: {e}", flush=True)
+
+                # Effects: light pulse and/or engine scare. Both are fire-and-
+                # forget — they run in their own daemon threads so they don't
+                # block motion detection. Scare mode implies a light pulse
+                # for the same duration so the deterrent looks coordinated.
+                scare_mode = bool(config.get("scareMode", False))
+                auto_light = bool(config.get("autoLight", True))
+                scare_duration = int(config.get("scareDurationS", 20))
+                light_duration = scare_duration if scare_mode else _light_auto_timeout(db, unit_id)
+
+                if scare_mode or auto_light:
+                    try:
+                        from relays import pulse_light
+                        pulse_light(db, unit_id, light_duration)
+                    except Exception as e:
+                        print(f"[sentry] pulse_light failed: {e}", flush=True)
+
+                if scare_mode:
+                    try:
+                        from scheduler import trigger_scare_pulse
+                        fired = trigger_scare_pulse(db, unit_id, scare_duration)
+                        if not fired:
+                            print("[sentry] scare suppressed (cooldown or already active)", flush=True)
+                    except Exception as e:
+                        print(f"[sentry] trigger_scare_pulse failed: {e}", flush=True)
+
                 # After event, refresh background so the new scene isn't motion.
                 bg = cv.createBackgroundSubtractorMOG2(
                     history=200, varThreshold=25, detectShadows=False,

@@ -63,6 +63,8 @@ export function SentryScreen() {
     useOptimistic(config.data?.autoLight ?? true);
   const [notifyOnMotion, setNotifyOptimistic] =
     useOptimistic(config.data?.notifyOnMotion ?? true);
+  const [scareMode, setScareOptimistic] =
+    useOptimistic(config.data?.scareMode ?? false);
 
   const loading = config.loading || state.loading;
 
@@ -97,6 +99,11 @@ export function SentryScreen() {
   const onToggleNotify = (next: boolean) => {
     setNotifyOptimistic(next);
     void updateSentryConfig(DEV_UNIT_ID, user.uid, { notifyOnMotion: next });
+  };
+
+  const onToggleScare = (next: boolean) => {
+    setScareOptimistic(next);
+    void updateSentryConfig(DEV_UNIT_ID, user.uid, { scareMode: next });
   };
 
   const onGoLive = () => {
@@ -197,6 +204,30 @@ export function SentryScreen() {
             onValueChange={onToggleNotify}
             trackColor={{ false: colors.borderStrong, true: colors.textDisplay }}
             thumbColor={notifyOnMotion ? colors.background : colors.textMuted}
+            ios_backgroundColor={colors.borderStrong}
+          />
+        </View>
+
+        {/* ── Scare mode ─────────────────────────────────────────────── */}
+        <View style={[styles.row, scareMode ? styles.scareRowActive : null]}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.rowLabel}>Scare mode</Text>
+            <Text style={styles.rowSubLabel}>
+              {scareMode
+                ? 'ARMED  ·  MOTION FIRES LIGHT + TWO-STROKE ENGINE'
+                : 'OFF  ·  MOTION ONLY TRIGGERS THE LIGHT'}
+            </Text>
+            {scareMode ? (
+              <Text style={styles.scareWarn}>
+                LOUD. BYPASSES QUIET HOURS. 5-MIN COOLDOWN BETWEEN TRIGGERS.
+              </Text>
+            ) : null}
+          </View>
+          <Switch
+            value={scareMode}
+            onValueChange={onToggleScare}
+            trackColor={{ false: colors.borderStrong, true: colors.danger }}
+            thumbColor={scareMode ? colors.textDisplay : colors.textMuted}
             ios_backgroundColor={colors.borderStrong}
           />
         </View>
@@ -474,6 +505,20 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontFamily: fonts.mono,
     fontSize: typeScale.monoLG,
+    letterSpacing: tracking.monoCaps,
+  },
+
+  scareRowActive: {
+    paddingHorizontal: spacing.md,
+    marginHorizontal: -spacing.md,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.danger,
+  },
+  scareWarn: {
+    marginTop: spacing.xs,
+    color: colors.danger,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoSM,
     letterSpacing: tracking.monoCaps,
   },
 

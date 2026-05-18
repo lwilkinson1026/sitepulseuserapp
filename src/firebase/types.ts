@@ -139,6 +139,12 @@ export interface SentryConfig {
   recordPostSec: number;           // post-roll seconds in saved clip
   notifyOnMotion: boolean;         // push notification on motion events
   autoLight: boolean;              // pulse light relay on motion
+  // Scare mode: when motion fires, light pulses AND the two-stroke engine
+  // briefly cranks on. Bypasses quiet hours by design — it's intentional
+  // alarm output, not background charging. A 5-min Pi-side cooldown
+  // prevents the engine from constantly cycling on repeated triggers.
+  scareMode: boolean;
+  scareDurationS: number;          // how long the engine runs on a scare (sec)
 }
 
 // units/{unitId}/config/camera — live-stream parameters.

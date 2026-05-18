@@ -203,6 +203,69 @@ def handle_charge_update(db: firestore.Client, unit_id: str, payload: Dict[str, 
     db.document(f"units/{unit_id}/config/charge").set(patch, merge=True)
 
 
+# ─── sentry-triggered scare pulse ──────────────────────────────────────────
+# Called from pi/sentry.py when motion fires and config/sentry.scareMode is
+# on. Fires the engine for `duration_s` seconds regardless of schedule, then
+# stops it. 5-minute cooldown so a stream of motion triggers doesn't cycle
+# the engine to death.
+
+_scare_lock = threading.Lock()
+_scare_active = False
+_last_scare_t: Optional[float] = None
+SCARE_COOLDOWN_S = 5 * 60
+
+
+def trigger_scare_pulse(db: firestore.Client, unit_id: str, duration_s: int = 20) -> bool:
+    """Returns True if the scare was fired, False if suppressed (already
+    running, or within cooldown). Non-blocking — work happens on a thread."""
+    global _scare_active, _last_scare_t
+
+    with _scare_lock:
+        if _scare_active:
+            return False
+        now = time.monotonic()
+        if _last_scare_t and (now - _last_scare_t) < SCARE_COOLDOWN_S:
+            return False
+        _scare_active = True
+        _last_scare_t = now
+
+    duration_s = max(3, min(60, int(duration_s)))   # clamp [3, 60] seconds
+
+    def pulse() -> None:
+        global _scare_active
+        try:
+            db.collection(f"units/{unit_id}/events").add({
+                "kind": "engine.start",
+                "at": firestore.SERVER_TIMESTAMP,
+                "source": "pi",
+                "payload": {"reason": "sentry_scare", "duration_s": duration_s},
+            })
+            amps = float(os.environ.get("SITEPULSE_ENGINE_CURRENT", "30"))
+            _vesc_set_current(amps)
+            time.sleep(duration_s)
+        except Exception as e:
+            print(f"[scheduler] scare pulse error: {e}", flush=True)
+        finally:
+            try:
+                _vesc_set_current(0.0)
+            except Exception:
+                pass
+            try:
+                db.collection(f"units/{unit_id}/events").add({
+                    "kind": "engine.stop",
+                    "at": firestore.SERVER_TIMESTAMP,
+                    "source": "pi",
+                    "payload": {"reason": "sentry_scare_complete"},
+                })
+            except Exception:
+                pass
+            with _scare_lock:
+                _scare_active = False
+
+    threading.Thread(target=pulse, daemon=True, name="scare-pulse").start()
+    return True
+
+
 # ─── scheduler loop ─────────────────────────────────────────────────────────
 
 _scheduler_thread: Optional[threading.Thread] = None

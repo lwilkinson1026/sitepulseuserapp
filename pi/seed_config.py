@@ -51,6 +51,10 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "recordPostSec": 10,
         "notifyOnMotion": True,
         "autoLight": True,
+        # Scare mode is OFF by default — opt-in. When on, motion fires
+        # the light AND cranks the two-stroke engine for scareDurationS.
+        "scareMode": False,
+        "scareDurationS": 20,
     },
     "camera": {
         "device": "/dev/video0",
