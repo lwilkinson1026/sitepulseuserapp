@@ -12,6 +12,7 @@ import { Image as ExpoImage } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Eyebrow, FigCaption, Screen } from '../../components';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
+import { useOptimistic } from '../../hooks/useOptimistic';
 import { useUnitEvents, type EventEntry } from '../../hooks/useUnitEvents';
 import { useStorageUrl } from '../../hooks/useStorageUrl';
 import { useAuth } from '../../hooks/AuthContext';
@@ -61,25 +62,36 @@ export function SentryScreen() {
     );
   }
 
-  const enabled = config.data?.enabled ?? false;
-  const sensitivity = config.data?.sensitivity ?? 0.4;
-  const autoLight = config.data?.autoLight ?? true;
-  const notifyOnMotion = config.data?.notifyOnMotion ?? true;
+  // Optimistic state so toggles snap on tap. Real value arrives once the Pi
+  // ACKs and mirrors the config back into Firestore.
+  const [enabled, setEnabledOptimistic] =
+    useOptimistic(config.data?.enabled ?? false);
+  const [sensitivity, setSensitivityOptimistic] =
+    useOptimistic(config.data?.sensitivity ?? 0.4);
+  const [autoLight, setAutoLightOptimistic] =
+    useOptimistic(config.data?.autoLight ?? true);
+  const [notifyOnMotion, setNotifyOptimistic] =
+    useOptimistic(config.data?.notifyOnMotion ?? true);
+
   const armed = state.data?.armed ?? false;
 
   const onToggleEnabled = (next: boolean) => {
+    setEnabledOptimistic(next);
     void (next ? armSentry(DEV_UNIT_ID, user.uid) : disarmSentry(DEV_UNIT_ID, user.uid));
   };
 
   const onSetSensitivity = (value: number) => {
+    setSensitivityOptimistic(value);
     void updateSentryConfig(DEV_UNIT_ID, user.uid, { sensitivity: value });
   };
 
   const onToggleAutoLight = (next: boolean) => {
+    setAutoLightOptimistic(next);
     void updateSentryConfig(DEV_UNIT_ID, user.uid, { autoLight: next });
   };
 
   const onToggleNotify = (next: boolean) => {
+    setNotifyOptimistic(next);
     void updateSentryConfig(DEV_UNIT_ID, user.uid, { notifyOnMotion: next });
   };
 

@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Eyebrow, FigCaption, Screen } from '../../components';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
+import { useOptimistic } from '../../hooks/useOptimistic';
 import { useAuth } from '../../hooks/AuthContext';
 import { setLight, setRelay } from '../../firebase/commands';
 import type {
@@ -47,6 +48,22 @@ export function OutletsScreen() {
     [lightChannel],
   );
 
+  // One optimistic value per relay channel. We pre-allocate all three hooks
+  // unconditionally (rules-of-hooks: never call hooks in a loop or branch),
+  // even though only two are typically aux and one is the light.
+  const truth1 = (relaysConfig.data?.channels?.['1']?.mode ?? 'off') as LightMode;
+  const truth2 = (relaysConfig.data?.channels?.['2']?.mode ?? 'off') as LightMode;
+  const truth3 = (relaysConfig.data?.channels?.['3']?.mode ?? 'off') as LightMode;
+  const [mode1, setMode1] = useOptimistic<LightMode>(truth1);
+  const [mode2, setMode2] = useOptimistic<LightMode>(truth2);
+  const [mode3, setMode3] = useOptimistic<LightMode>(truth3);
+  const channelModes: Record<'1' | '2' | '3', LightMode> = {
+    '1': mode1, '2': mode2, '3': mode3,
+  };
+  const setChannelMode: Record<'1' | '2' | '3', (m: LightMode) => void> = {
+    '1': setMode1, '2': setMode2, '3': setMode3,
+  };
+
   const loading =
     lightConfig.loading || relaysConfig.loading || lightState.loading;
 
@@ -63,16 +80,19 @@ export function OutletsScreen() {
     );
   }
 
-  const currentLightMode: LightMode = (lightConfig.data?.mode ?? 'off') as LightMode;
+  const lightChannelKey = String(lightChannel) as '1' | '2' | '3';
+  const currentLightMode: LightMode = channelModes[lightChannelKey];
   const overrideActive = lightState.data?.physicalOverride ?? false;
   const lightOn = lightState.data?.state ?? false;
 
   const onLightMode = (mode: LightMode) => {
     if (overrideActive) return; // hardware switch wins; UI is read-only
+    setChannelMode[lightChannelKey](mode);
     void setLight(DEV_UNIT_ID, user.uid, mode);
   };
 
   const onRelayMode = (channel: 1 | 2 | 3, mode: 'off' | 'on') => {
+    setChannelMode[String(channel) as '1' | '2' | '3'](mode);
     void setRelay(DEV_UNIT_ID, user.uid, channel, mode);
   };
 
@@ -154,8 +174,10 @@ export function OutletsScreen() {
         </View>
 
         {auxChannels.map((channel) => {
-          const cfg = relaysConfig.data?.channels[String(channel) as '1' | '2' | '3'];
-          const mode = (cfg?.mode ?? 'off') as 'off' | 'on';
+          const channelKey = String(channel) as '1' | '2' | '3';
+          const cfg = relaysConfig.data?.channels[channelKey];
+          // Optimistic mode wins; truth restores when the Pi mirrors back.
+          const mode = (channelModes[channelKey] as 'off' | 'on');
           return (
             <View key={channel} style={styles.card}>
               <View style={styles.cardHeaderRow}>

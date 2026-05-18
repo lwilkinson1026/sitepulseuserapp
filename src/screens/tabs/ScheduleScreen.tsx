@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { Eyebrow, FigCaption, Screen } from '../../components';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
+import { useOptimistic } from '../../hooks/useOptimistic';
 import { useAuth } from '../../hooks/AuthContext';
 import { overrideEngine, updateChargeConfig } from '../../firebase/commands';
 import type {
@@ -141,26 +142,38 @@ export function ScheduleScreen() {
     );
   }
 
-  const enabled = cfg?.enabled ?? false;
-  const activePreset = cfg?.preset;
+  // Optimistic state for every Firestore-bound control. Snaps the UI on tap,
+  // syncs back when the Pi's ACK mirrors the new value into config/charge.
+  const [enabled, setEnabledOptimistic] = useOptimistic(cfg?.enabled ?? false);
+  const [activePreset, setActivePresetOptimistic] =
+    useOptimistic<string | undefined>(cfg?.preset);
+  const [allowQuietOverride, setAllowQuietOverrideOptimistic] =
+    useOptimistic(cfg?.allowQuietOverride ?? false);
+
   const desired = eng?.desired ?? 'idle';
   const reason = eng?.reason;
   const socStart = cfg?.socStart ?? 25;
   const socStop = cfg?.socStop ?? 85;
   const socCritical = cfg?.socCritical ?? 12;
-  const allowQuietOverride = cfg?.allowQuietOverride ?? false;
 
   const onToggleEnabled = (next: boolean) => {
+    setEnabledOptimistic(next);
     void updateChargeConfig(DEV_UNIT_ID, user.uid, { enabled: next });
   };
 
   const onApplyPreset = (presetId: PresetId) => {
     const preset = PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
+    setActivePresetOptimistic(presetId);
+    if (preset.patch.enabled !== undefined) setEnabledOptimistic(preset.patch.enabled);
+    if (preset.patch.allowQuietOverride !== undefined) {
+      setAllowQuietOverrideOptimistic(preset.patch.allowQuietOverride);
+    }
     void updateChargeConfig(DEV_UNIT_ID, user.uid, preset.patch);
   };
 
   const onToggleQuietOverride = (next: boolean) => {
+    setAllowQuietOverrideOptimistic(next);
     void updateChargeConfig(DEV_UNIT_ID, user.uid, { allowQuietOverride: next });
   };
 
