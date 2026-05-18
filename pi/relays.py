@@ -1,8 +1,10 @@
 """
-Waveshare RPi Relay Board (B) controller + SPST physical-override switch.
+Waveshare RPi Relay Board controller + SPST physical-override switch.
 
 Hardware:
-  - Waveshare RPi Relay Board (B), 3 channels on BCM 5, 6, 13 (active-low).
+  - Waveshare RPi Relay Board (model D-1226 / original 3-channel),
+    BCM 26, 20, 13 (active-low). NOTE: the "RPi Relay Board (B)" model
+    uses BCM 5, 6, 13 instead — set the env vars below if you swap.
   - SPST toggle from BCM 17 to GND, internal pull-up enabled. Switch closed
     → light forced ON regardless of app/sentry. Switch open → app/auto wins.
 
@@ -35,9 +37,9 @@ from firebase_admin import firestore
 # ─── hardware config ────────────────────────────────────────────────────────
 
 RELAY_PINS: Dict[int, int] = {
-    1: int(os.environ.get("SITEPULSE_RELAY_1_PIN", "5")),
-    2: int(os.environ.get("SITEPULSE_RELAY_2_PIN", "6")),
-    3: int(os.environ.get("SITEPULSE_RELAY_3_PIN", "13")),
+    1: int(os.environ.get("SITEPULSE_RELAY_1_PIN", "26")),
+    2: int(os.environ.get("SITEPULSE_RELAY_2_PIN", "20")),
+    3: int(os.environ.get("SITEPULSE_RELAY_3_PIN", "21")),
 }
 OVERRIDE_PIN = int(os.environ.get("SITEPULSE_OVERRIDE_PIN", "17"))
 RELAY_ACTIVE_LOW = os.environ.get("SITEPULSE_RELAY_ACTIVE_LOW", "1") == "1"
@@ -89,7 +91,12 @@ def _ensure_initialized() -> None:
         g.setmode(g.BCM)
         g.setwarnings(False)
         for pin in RELAY_PINS.values():
-            g.setup(pin, g.OUT)
+            # initial= sidesteps rpi-lgpio's read-before-claim bug on Pi 5
+            # ("GPIO not allocated" when setup() tries to sample current state
+            # before the pin is claimed as output). Setting an explicit initial
+            # value skips that read entirely. We start HIGH which is "off" for
+            # an active-low board.
+            g.setup(pin, g.OUT, initial=g.HIGH)
             g.output(pin, _on_value(False))
         g.setup(OVERRIDE_PIN, g.IN, pull_up_down=g.PUD_UP)
         _initialized = True
