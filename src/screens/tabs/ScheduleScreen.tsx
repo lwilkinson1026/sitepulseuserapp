@@ -124,10 +124,20 @@ export function ScheduleScreen() {
   const chargeConfig = useUnitDoc<ChargeConfig>(DEV_UNIT_ID, 'config', 'charge');
   const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
 
-  // Stable derived values up-front so hook order is consistent across renders.
+  // Stable derived values + ALL hook calls up-front so hook order is
+  // consistent across renders (React's rules-of-hooks). The early loading
+  // return below must come AFTER every hook call on this screen.
   const cfg = chargeConfig.data;
   const eng = engineState.data;
   const windows: ChargeWindow[] = useMemo(() => cfg?.windows ?? [], [cfg]);
+
+  // Optimistic state for every Firestore-bound control. Snaps the UI on tap,
+  // syncs back when the Pi's ACK mirrors the new value into config/charge.
+  const [enabled, setEnabledOptimistic] = useOptimistic(cfg?.enabled ?? false);
+  const [activePreset, setActivePresetOptimistic] =
+    useOptimistic<string | undefined>(cfg?.preset);
+  const [allowQuietOverride, setAllowQuietOverrideOptimistic] =
+    useOptimistic(cfg?.allowQuietOverride ?? false);
 
   const loading = chargeConfig.loading || engineState.loading;
 
@@ -141,14 +151,6 @@ export function ScheduleScreen() {
       </Screen>
     );
   }
-
-  // Optimistic state for every Firestore-bound control. Snaps the UI on tap,
-  // syncs back when the Pi's ACK mirrors the new value into config/charge.
-  const [enabled, setEnabledOptimistic] = useOptimistic(cfg?.enabled ?? false);
-  const [activePreset, setActivePresetOptimistic] =
-    useOptimistic<string | undefined>(cfg?.preset);
-  const [allowQuietOverride, setAllowQuietOverrideOptimistic] =
-    useOptimistic(cfg?.allowQuietOverride ?? false);
 
   const desired = eng?.desired ?? 'idle';
   const reason = eng?.reason;

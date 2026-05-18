@@ -49,6 +49,21 @@ export function SentryScreen() {
   const camera = useUnitDoc<CameraState & { error?: string | null }>(DEV_UNIT_ID, 'current', 'camera');
   const events = useUnitEvents(DEV_UNIT_ID, { kindFilter: 'motion', pageSize: 20 });
 
+  // ALL hook calls up-front so hook order is consistent across renders
+  // (React's rules-of-hooks). The early loading return below must come
+  // AFTER every hook call.
+
+  // Optimistic state so toggles snap on tap. Real value arrives once the Pi
+  // ACKs and mirrors the config back into Firestore.
+  const [enabled, setEnabledOptimistic] =
+    useOptimistic(config.data?.enabled ?? false);
+  const [sensitivity, setSensitivityOptimistic] =
+    useOptimistic(config.data?.sensitivity ?? 0.4);
+  const [autoLight, setAutoLightOptimistic] =
+    useOptimistic(config.data?.autoLight ?? true);
+  const [notifyOnMotion, setNotifyOptimistic] =
+    useOptimistic(config.data?.notifyOnMotion ?? true);
+
   const loading = config.loading || state.loading;
 
   if (!user || loading) {
@@ -61,17 +76,6 @@ export function SentryScreen() {
       </Screen>
     );
   }
-
-  // Optimistic state so toggles snap on tap. Real value arrives once the Pi
-  // ACKs and mirrors the config back into Firestore.
-  const [enabled, setEnabledOptimistic] =
-    useOptimistic(config.data?.enabled ?? false);
-  const [sensitivity, setSensitivityOptimistic] =
-    useOptimistic(config.data?.sensitivity ?? 0.4);
-  const [autoLight, setAutoLightOptimistic] =
-    useOptimistic(config.data?.autoLight ?? true);
-  const [notifyOnMotion, setNotifyOptimistic] =
-    useOptimistic(config.data?.notifyOnMotion ?? true);
 
   const armed = state.data?.armed ?? false;
 
