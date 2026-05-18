@@ -26,6 +26,10 @@ android/
 .env.local
 .env.*.local
 
+# Pi env files (contain Cloudflare Stream secrets etc.) — NEVER commit
+pi/*.env
+pi/*.env.local
+
 # Service-account credentials — NEVER commit
 scripts/service-account.json
 **/service-account*.json
