@@ -10,6 +10,7 @@ import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 // @ts-expect-error — getReactNativePersistence is exported but missing from the .d.ts in firebase 12.x
 import { getAuth, initializeAuth, getReactNativePersistence, Auth } from 'firebase/auth';
 import { getFirestore, Firestore } from 'firebase/firestore';
+import { getStorage, FirebaseStorage } from 'firebase/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const firebaseConfig = {
@@ -24,6 +25,7 @@ const firebaseConfig = {
 let app: FirebaseApp;
 let auth: Auth;
 let db: Firestore;
+let storageInstance: FirebaseStorage;
 
 export function ensureFirebase() {
   if (getApps().length === 0) {
@@ -41,10 +43,11 @@ export function ensureFirebase() {
     auth = getAuth(app);
   }
   db = getFirestore(app);
-  return { app, auth, db };
+  storageInstance = getStorage(app);
+  return { app, auth, db, storage: storageInstance };
 }
 
 export function getFirebase() {
   if (!app) ensureFirebase();
-  return { app, auth, db };
+  return { app, auth, db, storage: storageInstance };
 }

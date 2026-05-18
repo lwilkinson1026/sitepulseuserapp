@@ -1,0 +1,35 @@
+rules_version = '2';
+
+// SitePulse Firebase Storage rules.
+//
+// Only the owner of a unit can read its clips. Uploads are server-only —
+// the Pi uses the Admin SDK (which bypasses rules) to push MP4s from
+// pi/sentry.py. The client never writes here.
+//
+// Path: units/{unitId}/clips/{filename}
+//   filename is normally {epoch-millis}.mp4 or .jpg for thumbnails.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isUnitOwner(unitId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/units/$(unitId))
+        && firestore.get(/databases/(default)/documents/units/$(unitId)).data.ownerId == request.auth.uid;
+    }
+
+    match /units/{unitId}/clips/{filename} {
+      allow read:  if isUnitOwner(unitId);
+      allow write: if false;
+    }
+
+    // Default-deny everything else.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

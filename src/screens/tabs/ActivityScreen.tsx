@@ -22,7 +22,7 @@ export function ActivityScreen() {
   return (
     <Screen>
       <View style={styles.header}>
-        <Eyebrow parts={['04 / Activity', 'Event log']} />
+        <Eyebrow parts={['05 / Activity', 'Event log']} />
       </View>
 
       <View style={styles.list}>
@@ -46,7 +46,7 @@ export function ActivityScreen() {
       </View>
 
       <View style={styles.footer}>
-        <FigCaption number={4} label="Activity" detail="UNIT-001" />
+        <FigCaption number={5} label="Activity" detail="UNIT-001" />
       </View>
     </Screen>
   );

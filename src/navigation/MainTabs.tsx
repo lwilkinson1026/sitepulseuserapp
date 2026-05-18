@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DashboardScreen } from '../screens/tabs/DashboardScreen';
 import { OutletsScreen } from '../screens/tabs/OutletsScreen';
 import { ScheduleScreen } from '../screens/tabs/ScheduleScreen';
+import { SentryScreen } from '../screens/tabs/SentryScreen';
 import { ActivityScreen } from '../screens/tabs/ActivityScreen';
 import { colors, fonts, hairline } from '../theme';
 import { MainTabsParamList } from './types';
@@ -20,7 +21,8 @@ const TAB_LABELS: Record<keyof MainTabsParamList, { num: string; label: string }
   Dashboard: { num: '01', label: 'DASHBOARD' },
   Outlets:   { num: '02', label: 'OUTLETS' },
   Schedule:  { num: '03', label: 'SCHEDULE' },
-  Activity:  { num: '04', label: 'ACTIVITY' },
+  Sentry:    { num: '04', label: 'SENTRY' },
+  Activity:  { num: '05', label: 'ACTIVITY' },
 };
 
 function TabLabel({ routeName, focused }: { routeName: keyof MainTabsParamList; focused: boolean }) {
@@ -66,6 +68,7 @@ export function MainTabs() {
       <Tab.Screen name="Dashboard" component={DashboardScreen} />
       <Tab.Screen name="Outlets" component={OutletsScreen} />
       <Tab.Screen name="Schedule" component={ScheduleScreen} />
+      <Tab.Screen name="Sentry" component={SentryScreen} />
       <Tab.Screen name="Activity" component={ActivityScreen} />
     </Tab.Navigator>
   );

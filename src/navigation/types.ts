@@ -18,5 +18,6 @@ export type MainTabsParamList = {
   Dashboard: undefined;
   Outlets: undefined;
   Schedule: undefined;
+  Sentry: undefined;
   Activity: undefined;
 };
