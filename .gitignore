@@ -46,3 +46,8 @@ scripts/service-account.json
 *.njsproj
 *.sln
 *.sw?
+.vercel
+.env*.local
+.env.production
+.env.preview
+.env.development
