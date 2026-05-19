@@ -62,6 +62,25 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "fps": 24,
         # cloudflareInputId left unset until the user provisions a live input
     },
+    "servos": {
+        # Bench-calibrated 2026-05-18: usable pulse range ~1333-1667 us
+        # for both servos (60-120 deg in the 1000-2000 us Servo mapping).
+        # Polarity resolves at linkage install — flip minUs/maxUs there.
+        "choke":    {"channel": 0, "minUs": 1333, "maxUs": 1667, "slewRate": 2.0,
+                     "defaultOnStart": 0.0, "defaultOnFault": 0.0},
+        "throttle": {"channel": 1, "minUs": 1333, "maxUs": 1667, "slewRate": 1.5,
+                     "defaultOnStart": 0.0, "defaultOnFault": 0.0},
+        "presets": {
+            "idle":       {"choke": 0.0, "throttle": 0.0},
+            "start_cold": {"choke": 1.0, "throttle": 0.2},
+            "start_warm": {"choke": 0.3, "throttle": 0.15},
+            "run":        {"choke": 0.0, "throttle": 0.5},
+        },
+        # v1 watchdog is time-based only (no engine-state check). Default
+        # off until VESC CAN frame lands and we can gate by "engine off".
+        "watchdogEnabled": False,
+        "watchdogTimeoutS": 5,
+    },
     "charge": {
         "enabled": False,
         "preset": "daytime_only",

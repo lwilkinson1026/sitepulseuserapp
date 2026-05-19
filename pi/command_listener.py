@@ -95,6 +95,10 @@ HANDLERS: Dict[str, Handler] = {
     "sentry.update":     _lazy("sentry",   "handle_sentry_update",    "sentry.update"),
     "camera.startStream": _lazy("streamer", "handle_camera_start",    "camera.startStream"),
     "camera.stopStream":  _lazy("streamer", "handle_camera_stop",     "camera.stopStream"),
+    # Phase E
+    "servo.set":         _lazy("servos",  "handle_servo_set",         "servo.set"),
+    "servo.preset":      _lazy("servos",  "handle_servo_preset",      "servo.preset"),
+    "servo.update":      _lazy("servos",  "handle_servo_update",      "servo.update"),
     # Legacy / phase 1 — already-shipped outlet relays
     "outlet.toggle":     _not_implemented("outlet.toggle"),
     "theft.arm":         _not_implemented("theft.arm"),
@@ -220,6 +224,9 @@ def _start_background_services(db: firestore.Client) -> None:
         ("streamer.start_streamer", lambda: __import__(
             "streamer", fromlist=["start_streamer"]
         ).start_streamer(db, UNIT_ID)),
+        ("servos.start_servos", lambda: __import__(
+            "servos", fromlist=["start_servos"]
+        ).start_servos(db, UNIT_ID)),
     ]
     for name, starter in services:
         try:
@@ -259,6 +266,13 @@ def main() -> None:
             watch.unsubscribe()
         except Exception:
             pass
+        # Detach servos so PWM stops and linkages spring-return. If start
+        # failed (no hardware), detach_all is a safe no-op.
+        try:
+            from servos import detach_all as _servos_detach
+            _servos_detach()
+        except Exception as e:
+            _log(f"shutdown: servos.detach_all failed: {e}")
         _log("listener stopped")
 
 
