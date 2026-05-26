@@ -1,201 +1,110 @@
 """
 SitePulse Firebase publisher.
 
-Reads VESC BMS CAN frames directly from `can0` (no TCP intermediary) and
-publishes a TelemetrySnapshot to Firestore at units/{UNIT_ID}/current/snapshot
-every PUBLISH_INTERVAL seconds.
+Sniffs the Predator 2000W's BMS↔LCD I²C bus (passive parallel tap on the
+LCD connector), decodes the LCD frame, and publishes a TelemetrySnapshot
+to Firestore at units/{UNIT_ID}/current/snapshot every PUBLISH_INTERVAL
+seconds.
 
-Decodes the standard VESC BMS packet types:
-  0x26 V_TOT       pack voltage, charge-port voltage
-  0x27 I           pack current (signed: + = charge, - = discharge)
-  0x29 V_CELL      per-cell voltages (3 cells per frame, indexed)
-  0x2B TEMPS       temperatures (3 per frame, indexed)
-  0x2D SOC_SOH_T   state of charge, state of health, IC temp, status
-
-Arbitration ID layout (VESC convention):
-    (packet_type << 8) | vesc_id
+Pi wiring (parallel with the LCD harness):
+    GPIO 2  (pin 3)  → SDA   (LCD white wire)
+    GPIO 3  (pin 5)  → SCL   (LCD yellow wire)
+    GND     (pin 6)  → GND   (LCD green wire)
+    DO NOT connect any Pi power rail to the Predator.
 
 Setup on the Pi:
-    pip3 install --break-system-packages firebase-admin python-can
-    # python-can is usually already installed (bms_tcp_server.py uses it)
+    pip3 install --break-system-packages firebase-admin lgpio
 
     chmod 600 ~/sitepulse/service-account.json
     SITEPULSE_SA=~/sitepulse/service-account.json python3 firebase_publisher.py
 
 Env vars:
-    SITEPULSE_UNIT_ID    default UNIT-001
-    SITEPULSE_SA         path to service account JSON
-    SITEPULSE_CAN        CAN interface, default can0
-    SITEPULSE_VESC_ID    VESC unit id on the bus, default 3
-    SITEPULSE_INTERVAL   publish interval seconds, default 3
-    SITEPULSE_DEBUG      "1" to dump raw cell/temp arrays each publish
+    SITEPULSE_UNIT_ID              default UNIT-001
+    SITEPULSE_SA                   path to service account JSON
+    SITEPULSE_INTERVAL             publish interval seconds, default 3
+    SITEPULSE_PREDATOR_ADDR        I²C address to watch, default 0x3E
+    SITEPULSE_PREDATOR_SDA_PIN     BCM GPIO for SDA, default 2
+    SITEPULSE_PREDATOR_SCL_PIN     BCM GPIO for SCL, default 3
+    SITEPULSE_PREDATOR_GPIO_CHIP   lgpio chip id, default 0
+    SITEPULSE_PREDATOR_PUBLISH_RAW "1" to include raw_frame_hex in published docs
+    SITEPULSE_DEBUG                "1" to log every decoded frame, not just publishes
 """
 
+from __future__ import annotations
+
 import os
-import struct
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import can
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+from predator_decoder import FrameAssembler, decode_frame
+from predator_i2c_sniffer import PassiveI2cSniffer
 
 
 UNIT_ID            = os.environ.get("SITEPULSE_UNIT_ID", "UNIT-001")
 SERVICE_ACCOUNT    = os.path.expanduser(
     os.environ.get("SITEPULSE_SA", "~/sitepulse/service-account.json")
 )
-CAN_CHANNEL        = os.environ.get("SITEPULSE_CAN", "can0")
-VESC_ID            = int(os.environ.get("SITEPULSE_VESC_ID", "3"))
 PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "3"))
+WATCH_ADDRESS      = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
+PUBLISH_RAW        = os.environ.get("SITEPULSE_PREDATOR_PUBLISH_RAW") == "1"
 DEBUG              = os.environ.get("SITEPULSE_DEBUG") == "1"
 
 
-# VESC BMS CAN packet types
-PKT_V_TOT             = 0x26
-PKT_I                 = 0x27
-PKT_AH_WH             = 0x28
-PKT_V_CELL            = 0x29
-PKT_BAL               = 0x2A
-PKT_TEMPS             = 0x2B
-PKT_HUM               = 0x2C
-PKT_SOC_SOH_TEMP_STAT = 0x2D
+# Diagnostic counters reset every publish cycle.
+class _Stats:
+    def __init__(self) -> None:
+        self.frames_decoded = 0
+        self.frames_window_start = time.monotonic()
+        self.last_warnings: list[str] = []
+        self.last_raw_frame: Optional[list[int]] = None
+        self.warning_log_seen: set[str] = set()  # rate-limit duplicate warning lines
+
+    def reset(self) -> None:
+        self.frames_decoded = 0
+        self.frames_window_start = time.monotonic()
 
 
-class BMSState:
-    def __init__(self):
-        self.v_tot = 0.0
-        self.v_charge = 0.0
-        self.i_in = 0.0
-        # Harmony emits zero-valued 0x27 frames as "no fresh measurement"
-        # between real readings. Hold the last non-zero value until we see
-        # enough consecutive zeros to call it true idle.
-        self.i_in_zero_streak = 0
-        self.soc = 0.0          # 0.0 - 1.0 ratio
-        self.soh = 0.0
-        self.t_ic = 0.0
-        self.is_charging = False
-        self.is_balancing = False
-        self.cells: list[float] = []
-        self.n_cells = 0
-        self.temps: list[float] = []
-        self.n_temps = 0
-        self.last_frame_ts = 0.0
+stats = _Stats()
 
 
-state = BMSState()
+def build_snapshot() -> Optional[dict]:
+    """Build the dict written to units/{UNIT_ID}/current/snapshot.
 
+    Returns None if no frame has been decoded yet (e.g., the BMS hasn't
+    started talking, or we're still waiting for the first full sweep).
+    """
+    if stats.last_raw_frame is None:
+        return None
 
-def _u16_be(d, off): return (d[off] << 8) | d[off + 1]
-def _i16_be(d, off):
-    v = _u16_be(d, off)
-    return v - 0x10000 if v & 0x8000 else v
-def _f32_be(d, off):
-    return struct.unpack(">f", bytes(d[off:off + 4]))[0]
+    decoded = decode_frame(stats.last_raw_frame)
 
+    # Frame rate: completed frames over the publish window.
+    elapsed = max(0.001, time.monotonic() - stats.frames_window_start)
+    frame_rate_hz = round(stats.frames_decoded / elapsed, 2)
 
-def decode_frame(arb_id: int, data: bytes) -> None:
-    pkt_type = (arb_id >> 8) & 0xFF
-    vesc_id  = arb_id & 0xFF
-    if vesc_id != VESC_ID:
-        return
-
-    state.last_frame_ts = time.monotonic()
-
-    if pkt_type == PKT_V_TOT and len(data) >= 8:
-        state.v_tot    = _f32_be(data, 0)
-        state.v_charge = _f32_be(data, 4)
-
-    elif pkt_type == PKT_I and len(data) >= 8:
-        # Harmony 16 leaves bytes 0-3 (i_in) at zero and reports magnitude
-        # only in bytes 4-7 (i_in_ic). No direction bit yet, so assume
-        # discharge (negative) by default — flip once we wire charger detection.
-        i_in_ic = _f32_be(data, 4)
-        if abs(i_in_ic) >= 0.5:
-            state.i_in = -i_in_ic
-            state.i_in_zero_streak = 0
-        else:
-            state.i_in_zero_streak += 1
-            # After ~10 consecutive zero frames, accept true idle.
-            if state.i_in_zero_streak >= 10:
-                state.i_in = 0.0
-
-    elif pkt_type == PKT_V_CELL and len(data) >= 4:
-        cell_num = data[0]
-        n_cells  = data[1]
-        state.n_cells = n_cells
-        if len(state.cells) < n_cells:
-            state.cells.extend([0.0] * (n_cells - len(state.cells)))
-        # up to 3 cells (f16, scale 1e3) after the 2-byte header
-        for i in range((len(data) - 2) // 2):
-            idx = cell_num + i
-            if 0 <= idx < n_cells:
-                state.cells[idx] = _u16_be(data, 2 + i * 2) / 1000.0
-
-    elif pkt_type == PKT_TEMPS and len(data) >= 4:
-        adc_num = data[0]
-        n_temps = data[1]
-        state.n_temps = n_temps
-        if len(state.temps) < n_temps:
-            state.temps.extend([0.0] * (n_temps - len(state.temps)))
-        # up to 3 temps (f16 signed, scale 1e2) after the 2-byte header
-        for i in range((len(data) - 2) // 2):
-            idx = adc_num + i
-            if 0 <= idx < n_temps:
-                state.temps[idx] = _i16_be(data, 2 + i * 2) / 100.0
-
-    elif pkt_type == PKT_SOC_SOH_TEMP_STAT and len(data) >= 7:
-        # Harmony 16 firmware packs SoC as a single byte scaled to 0-255,
-        # and IC temp as a signed byte at offset 6. This differs from upstream
-        # VESC BMS firmware which uses float16 fields.
-        state.soc  = data[4] / 255.0
-        state.t_ic = struct.unpack_from("b", bytes(data), 6)[0]
-
-
-def build_snapshot() -> dict:
-    valid_cells = [c for c in state.cells if c > 0.5]
-    if valid_cells:
-        vmin = min(valid_cells)
-        vmax = max(valid_cells)
-        vdelta = vmax - vmin
-    else:
-        vmin = vmax = vdelta = 0.0
-
-    valid_temps = [t for t in state.temps if -40 < t < 100]
-    if valid_temps:
-        tmin = min(valid_temps)
-        tmax = max(valid_temps)
-        tavg = sum(valid_temps) / len(valid_temps)
-    else:
-        tmin = tmax = tavg = state.t_ic
-
-    if state.i_in > 0.5:
-        mode = "charging"
-    elif state.i_in < -0.5:
-        mode = "discharging"
-    else:
-        mode = "idle"
-
-    return {
-        "battery_soc":     round(state.soc * 100, 1),
-        "battery_voltage": round(state.v_tot, 2),
-        "battery_current": round(state.i_in, 2),
-        "battery_temp":    round(tavg, 1),
-        "battery_power":   round(state.v_tot * state.i_in, 1),
-        "cells": {
-            "voltages":     [round(c, 3) for c in state.cells],
-            "voltageMin":   round(vmin, 3),
-            "voltageMax":   round(vmax, 3),
-            "voltageDelta": round(vdelta, 3),
-            "tempMin":      round(tmin, 1),
-            "tempMax":      round(tmax, 1),
-            "tempAvg":      round(tavg, 1),
-        },
-        "bmsFaults": [],
-        "system_mode": mode,
+    snap: dict = {
+        "battery_soc":           decoded["battery_soc"],
+        "output_mode":           decoded["output_mode"],
+        "output_watts":          decoded["output_watts"],
+        "time_to_empty_minutes": decoded["time_to_empty_minutes"],
+        "system_mode":           decoded["system_mode"],
+        "lcd_frame_rate_hz":     frame_rate_hz,
+        # Preserve the array shape the existing app expects.  Empty until
+        # we map LCD fault icons (low battery, overload, overheat, etc.).
+        "bmsFaults":             [],
     }
+
+    if PUBLISH_RAW:
+        snap["raw_frame_hex"] = " ".join(f"{b:02X}" for b in stats.last_raw_frame)
+
+    # Stash warnings so main() can log them.
+    stats.last_warnings = list(decoded["warnings"])
+    return snap
 
 
 def init_firestore() -> firestore.Client:
@@ -220,45 +129,72 @@ def publish(db: firestore.Client, snap: dict) -> None:
     )
 
 
+def _log_warnings_once(warnings: list[str]) -> None:
+    """De-dupe identical warning strings across publishes — a 78% SoC byte
+    we've already seen unmapped shouldn't spam the log on every cycle."""
+    for w in warnings:
+        if w in stats.warning_log_seen:
+            continue
+        stats.warning_log_seen.add(w)
+        print(f"[predator] {w}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     db = init_firestore()
-    bus = can.interface.Bus(channel=CAN_CHANNEL, interface="socketcan")
     print(
-        f"[sitepulse] CAN listener on {CAN_CHANNEL}, "
-        f"vesc_id={VESC_ID}, publishing {UNIT_ID} every {PUBLISH_INTERVAL_S}s"
+        f"[sitepulse] Predator I²C sniffer starting "
+        f"(addr=0x{WATCH_ADDRESS:02X}, publishing {UNIT_ID} every {PUBLISH_INTERVAL_S}s)",
+        flush=True,
     )
 
+    assembler = FrameAssembler()
     last_published = 0.0
-    for msg in bus:
-        decode_frame(msg.arbitration_id, msg.data)
 
-        now = time.monotonic()
-        if now - last_published < PUBLISH_INTERVAL_S:
-            continue
-        if state.last_frame_ts == 0:
-            continue  # haven't seen any frames yet
+    with PassiveI2cSniffer() as sniff:
+        for txn in sniff.transactions(timeout_s=PUBLISH_INTERVAL_S):
+            now = time.monotonic()
 
-        try:
-            snap = build_snapshot()
-            publish(db, snap)
-            last_published = now
-            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            cells_seen = sum(1 for c in state.cells if c > 0.5)
-            print(
-                f"[{stamp}] {UNIT_ID}  "
-                f"soc={snap['battery_soc']}%  "
-                f"v={snap['battery_voltage']}V  "
-                f"i={snap['battery_current']}A  "
-                f"t={snap['battery_temp']}°C  "
-                f"mode={snap['system_mode']}  "
-                f"cells={cells_seen}/{state.n_cells}"
-            )
-            if DEBUG:
-                print(f"  cells: {state.cells}")
-                print(f"  temps: {state.temps}")
-                print(f"  soc_raw={state.soc} soh_raw={state.soh} t_ic={state.t_ic}")
-        except Exception as e:
-            print(f"[firestore] write failed: {e}", file=sys.stderr)
+            # Process whatever transactions arrived since the last loop.
+            if txn is not None and txn.address == WATCH_ADDRESS and txn.ack and len(txn.data) == 3:
+                # Predator BMS writes 3-byte commands: [0x80, reg, val].
+                if txn.data[0] == 0x80:
+                    reg, val = txn.data[1], txn.data[2]
+                    completed = assembler.feed(reg, val)
+                    if completed is not None:
+                        stats.frames_decoded += 1
+                        stats.last_raw_frame = completed
+                        if DEBUG:
+                            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            hex_str = " ".join(f"{b:02X}" for b in completed)
+                            print(f"[{stamp}] frame: {hex_str}", flush=True)
+
+            # Periodic publish — independent of inbound transactions so we
+            # always heartbeat even if the bus stalls.
+            if now - last_published < PUBLISH_INTERVAL_S:
+                continue
+
+            try:
+                snap = build_snapshot()
+                if snap is None:
+                    if now - last_published > 10:
+                        print("[predator] no frames decoded yet (bus quiet?)", flush=True)
+                    continue
+                publish(db, snap)
+                last_published = now
+                _log_warnings_once(stats.last_warnings)
+                stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                print(
+                    f"[{stamp}] {UNIT_ID}  "
+                    f"soc={snap['battery_soc']}%  "
+                    f"mode={snap['output_mode']}  "
+                    f"watts={snap['output_watts']}  "
+                    f"ttempty={snap['time_to_empty_minutes']}m  "
+                    f"frames={stats.frames_decoded}  rate={snap['lcd_frame_rate_hz']}Hz",
+                    flush=True,
+                )
+                stats.reset()
+            except Exception as e:
+                print(f"[firestore] write failed: {e}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

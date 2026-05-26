@@ -1,0 +1,30 @@
+[Unit]
+Description=SitePulse Firebase publisher (Predator I²C → Firestore)
+After=network-online.target
+Wants=network-online.target
+# Publisher sniffs the Predator's BMS↔LCD I²C bus on GPIO 2/3.  No CAN
+# dependency anymore — the VESC sitepulse-can.service is no longer required.
+
+[Service]
+Type=simple
+User=lwilkinson
+WorkingDirectory=/home/lwilkinson/sitepulse
+Environment=SITEPULSE_SA=/home/lwilkinson/sitepulse/service-account.json
+# Override the defaults below by editing /etc/default/sitepulse-publisher
+# or by writing a drop-in:
+#   sudo systemctl edit sitepulse-publisher.service
+# Defaults baked into the Python module itself if these are unset.
+Environment=SITEPULSE_PREDATOR_SDA_PIN=2
+Environment=SITEPULSE_PREDATOR_SCL_PIN=3
+Environment=SITEPULSE_PREDATOR_ADDR=0x3E
+Environment=SITEPULSE_INTERVAL=3
+ExecStart=/usr/bin/python3 -u /home/lwilkinson/sitepulse/firebase_publisher.py
+Restart=on-failure
+RestartSec=5
+# Preserve the existing log file workflow — same paths the manual
+# nohup commands wrote to, so `tail -f publisher.log` keeps working.
+StandardOutput=append:/home/lwilkinson/sitepulse/publisher.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
