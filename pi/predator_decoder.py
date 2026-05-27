@@ -91,6 +91,8 @@ _WATTS_DIGITS = {
 _BATTERY_SOC_LOOKUP: dict[tuple[int, int], int] = {
     (0xFE, 0xD7): 85,
     (0xFE, 0x5D): 78,
+    (0x4A, 0xF7): 76,   # photographed during live session, IMG_5574
+    (0x4A, 0xD7): 73,   # confirmed during heater test in same session
     # As you observe more known percentages, append rows like:
     #   (0xFE, 0x42): 70,
     # The publisher logs every unknown pair so you can backfill this table.
