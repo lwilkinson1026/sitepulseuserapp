@@ -173,69 +173,82 @@ class PassiveI2cSniffer:
         self._handle: Optional[int] = None
         self._queue: queue.Queue[Transaction] = queue.Queue(maxsize=2048)
         self._state = _SnifferState(self._queue)
-        # lgpio gives us a single callback-per-line; we route through a
-        # tiny lock so the SDA and SCL callbacks don't trample each other.
-        self._lock = threading.Lock()
-        self._sda_cb_id: Optional[int] = None
-        self._scl_cb_id: Optional[int] = None
+        self._stop_event = threading.Event()
+        self._poll_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
+        """Claim the GPIO lines and spawn the polling thread.
+
+        We use a polling loop instead of `lgpio.callback()` for two reasons:
+
+         1. Callbacks fire on lgpio's own background thread, which can deliver
+            SDA and SCL edges in an order that doesn't match the actual hardware
+            timeline — fatal for an I²C state machine where SDA must be sampled
+            at the moment SCL rises.
+         2. Polling lets us read both pins in the *same syscall sequence*, so
+            we never get a stale view of one while looking at the other.
+
+        At 9 kHz the bus has ~110 µs/bit; polling at ~100 kHz on a Pi 5 catches
+        every edge with margin.  CPU cost is ~5% of one core — negligible.
+        """
         if self._handle is not None:
             return
         h = lgpio.gpiochip_open(self._chip)
 
-        # `gpio_claim_alert` both claims the line AND sets up edge alerts.
-        # Earlier code claimed via `gpio_claim_input` first, which on lgpio
-        # 0.2.2.0 caused the subsequent claim_alert to fail silently with
-        # the pin stuck in plain-input mode → callbacks never fired.
-        rc_sda = lgpio.gpio_claim_alert(h, self._sda_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
-        rc_scl = lgpio.gpio_claim_alert(h, self._scl_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
+        rc_sda = lgpio.gpio_claim_input(h, self._sda_pin, lgpio.SET_PULL_NONE)
+        rc_scl = lgpio.gpio_claim_input(h, self._scl_pin, lgpio.SET_PULL_NONE)
         if rc_sda < 0 or rc_scl < 0:
             lgpio.gpiochip_close(h)
             raise RuntimeError(
-                f"lgpio.gpio_claim_alert failed: "
+                f"lgpio.gpio_claim_input failed: "
                 f"SDA(GPIO{self._sda_pin})={rc_sda}  SCL(GPIO{self._scl_pin})={rc_scl}  "
                 "(non-zero return = error; usually 'pin already in use')"
             )
 
-        # Seed initial levels AFTER claiming so the first edge has the
-        # right context.  Without this the START detector might fire a
-        # bogus event on the very first SDA edge.
+        # Seed initial levels so the first detected transition has correct
+        # context (i.e., we don't mistake the boot-time idle-high state for
+        # a STOP condition fired on the first poll).
         self._state.sda_level = lgpio.gpio_read(h, self._sda_pin)
         self._state.scl_level = lgpio.gpio_read(h, self._scl_pin)
 
-        def sda_cb(chip: int, gpio: int, level: int, tick: int) -> None:
-            with self._lock:
-                _on_sda_edge(self._state, level, self._state.scl_level)
-
-        def scl_cb(chip: int, gpio: int, level: int, tick: int) -> None:
-            with self._lock:
-                _on_scl_edge(self._state, level, self._state.sda_level)
-
-        self._sda_cb_id = lgpio.callback(h, self._sda_pin, lgpio.BOTH_EDGES, sda_cb)
-        self._scl_cb_id = lgpio.callback(h, self._scl_pin, lgpio.BOTH_EDGES, scl_cb)
         self._handle = h
+        self._stop_event.clear()
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="i2c-sniff"
+        )
+        self._poll_thread.start()
+
+    def _poll_loop(self) -> None:
+        """Tight loop reading SDA + SCL, dispatching to the state machine on
+        every transition.  Single-threaded → no ordering races."""
+        h = self._handle
+        sda_pin = self._sda_pin
+        scl_pin = self._scl_pin
+        state = self._state
+        read = lgpio.gpio_read   # local alias for speed
+
+        while not self._stop_event.is_set():
+            sda = read(h, sda_pin)
+            scl = read(h, scl_pin)
+
+            # Process SCL changes first.  The state machine for SCL rising
+            # samples SDA via the fresh `sda` value we just read.
+            if scl != state.scl_level:
+                _on_scl_edge(state, scl, sda)
+            if sda != state.sda_level:
+                _on_sda_edge(state, sda, scl)
 
     def stop(self) -> None:
         h = self._handle
         if h is None:
             return
+        self._stop_event.set()
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=2.0)
+            self._poll_thread = None
         try:
-            # lgpio.callback() returns a _callback OBJECT (not an int) — cancel
-            # it via the object's .cancel() method, not a module-level function.
-            # (lgpio.callback_cancel does NOT exist; that was an earlier bug.)
-            if self._sda_cb_id is not None:
-                try:
-                    self._sda_cb_id.cancel()
-                except Exception:
-                    pass
-            if self._scl_cb_id is not None:
-                try:
-                    self._scl_cb_id.cancel()
-                except Exception:
-                    pass
-        finally:
             lgpio.gpiochip_close(h)
+        finally:
             self._handle = None
 
     def __enter__(self) -> "PassiveI2cSniffer":
