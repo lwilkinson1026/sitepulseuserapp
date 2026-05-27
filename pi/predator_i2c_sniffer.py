@@ -180,16 +180,26 @@ class PassiveI2cSniffer:
         if self._handle is not None:
             return
         h = lgpio.gpiochip_open(self._chip)
-        lgpio.gpio_claim_input(h, self._sda_pin, lgpio.SET_PULL_NONE)
-        lgpio.gpio_claim_input(h, self._scl_pin, lgpio.SET_PULL_NONE)
 
-        # Seed initial levels so the first edge has the right context.
+        # `gpio_claim_alert` both claims the line AND sets up edge alerts.
+        # Earlier code claimed via `gpio_claim_input` first, which on lgpio
+        # 0.2.2.0 caused the subsequent claim_alert to fail silently with
+        # the pin stuck in plain-input mode → callbacks never fired.
+        rc_sda = lgpio.gpio_claim_alert(h, self._sda_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
+        rc_scl = lgpio.gpio_claim_alert(h, self._scl_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
+        if rc_sda < 0 or rc_scl < 0:
+            lgpio.gpiochip_close(h)
+            raise RuntimeError(
+                f"lgpio.gpio_claim_alert failed: "
+                f"SDA(GPIO{self._sda_pin})={rc_sda}  SCL(GPIO{self._scl_pin})={rc_scl}  "
+                "(non-zero return = error; usually 'pin already in use')"
+            )
+
+        # Seed initial levels AFTER claiming so the first edge has the
+        # right context.  Without this the START detector might fire a
+        # bogus event on the very first SDA edge.
         self._state.sda_level = lgpio.gpio_read(h, self._sda_pin)
         self._state.scl_level = lgpio.gpio_read(h, self._scl_pin)
-
-        # Both edges on both lines.
-        lgpio.gpio_claim_alert(h, self._sda_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
-        lgpio.gpio_claim_alert(h, self._scl_pin, lgpio.BOTH_EDGES, lgpio.SET_PULL_NONE)
 
         def sda_cb(chip: int, gpio: int, level: int, tick: int) -> None:
             with self._lock:
