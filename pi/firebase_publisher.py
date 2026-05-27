@@ -7,10 +7,14 @@ to Firestore at units/{UNIT_ID}/current/snapshot every PUBLISH_INTERVAL
 seconds.
 
 Pi wiring (parallel with the LCD harness):
-    GPIO 2  (pin 3)  → SDA   (LCD white wire)
-    GPIO 3  (pin 5)  → SCL   (LCD yellow wire)
+    GPIO 22 (pin 15) → SDA   (LCD white wire)
+    GPIO 23 (pin 16) → SCL   (LCD yellow wire)
     GND     (pin 6)  → GND   (LCD green wire)
     DO NOT connect any Pi power rail to the Predator.
+
+Note: deliberately NOT GPIO 2/3 — those are the kernel's i2c-1 bus where
+the PCA9685 servo driver lives.  We bit-bang via lgpio so any GPIO pair
+works; 22/23 are adjacent on the header and unused elsewhere in the stack.
 
 Setup on the Pi:
     pip3 install --break-system-packages firebase-admin lgpio
@@ -23,8 +27,8 @@ Env vars:
     SITEPULSE_SA                   path to service account JSON
     SITEPULSE_INTERVAL             publish interval seconds, default 3
     SITEPULSE_PREDATOR_ADDR        I²C address to watch, default 0x3E
-    SITEPULSE_PREDATOR_SDA_PIN     BCM GPIO for SDA, default 2
-    SITEPULSE_PREDATOR_SCL_PIN     BCM GPIO for SCL, default 3
+    SITEPULSE_PREDATOR_SDA_PIN     BCM GPIO for SDA, default 22
+    SITEPULSE_PREDATOR_SCL_PIN     BCM GPIO for SCL, default 23
     SITEPULSE_PREDATOR_GPIO_CHIP   lgpio chip id, default 0
     SITEPULSE_PREDATOR_PUBLISH_RAW "1" to include raw_frame_hex in published docs
     SITEPULSE_DEBUG                "1" to log every decoded frame, not just publishes

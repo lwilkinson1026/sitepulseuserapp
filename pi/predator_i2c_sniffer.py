@@ -13,10 +13,15 @@ push completed transactions into a thread-safe queue that the publisher
 drains in its main loop.
 
 Wiring (Pi 5):
-    GPIO 2  (pin 3)  — SDA, splice to the LCD's white wire
-    GPIO 3  (pin 5)  — SCL, splice to the LCD's yellow wire
+    GPIO 22 (pin 15) — SDA, splice to the LCD's white wire
+    GPIO 23 (pin 16) — SCL, splice to the LCD's yellow wire
     GND     (pin 6)  — splice to the LCD's green wire
     DO NOT connect any Pi power rail to the Predator harness.
+
+We deliberately avoid GPIO 2/3 (the kernel's i2c-1 bus) because the PCA9685
+servo driver already lives there.  Two I²C masters on the same wires would
+collide.  Since we bit-bang via lgpio edge interrupts rather than the
+kernel I²C peripheral, we're free to pick any unused GPIO pair.
 
 The bus is already pulled up by the LCD harness itself, so we do NOT add
 internal pull-ups — that would double-load the bus.
@@ -37,8 +42,8 @@ except ImportError:
     lgpio = None  # graceful fallback for off-Pi development / unit tests
 
 
-SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "2"))
-SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "3"))
+SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "22"))
+SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "23"))
 GPIO_CHIP        = int(os.environ.get("SITEPULSE_PREDATOR_GPIO_CHIP", "0"))
 WATCH_ADDRESS    = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 
