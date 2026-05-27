@@ -94,6 +94,7 @@ _BATTERY_SOC_LOOKUP: dict[tuple[int, int], int] = {
     (0x4A, 0xF7): 76,   # photographed during live session, IMG_5574
     (0x4A, 0xD7): 73,   # confirmed during heater test in same session
     (0x4A, 0xDB): 72,   # photographed live, IMG_5578
+    (0x4A, 0xBB): 71,   # confirmed live via raw_frame_hex from Firestore
     # As you observe more known percentages, append rows like:
     #   (0xFE, 0x42): 70,
     # The publisher logs every unknown pair so you can backfill this table.
