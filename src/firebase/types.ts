@@ -32,38 +32,36 @@ export interface UnitDoc {
 }
 
 // VESC Harmony 16: 16 cell voltages, multiple temperature sensors.
-// Keep the snapshot under ~2 KB by trimming cells to fixed precision.
-export interface CellPack {
-  voltages: number[];              // length 16, units V, 3 decimals
-  voltageMin: number;
-  voltageMax: number;
-  voltageDelta: number;            // max - min, useful for balancing health
-  tempMin: number;                 // °C
-  tempMax: number;                 // °C
-  tempAvg: number;                 // °C
-}
-
 // units/{unitId}/current/snapshot — Pi overwrites this every 2–5 s.
 // The app listens with onSnapshot and renders the dashboard.
+//
+// As of the Predator I²C migration (replacing the VESC CAN BMS pipeline),
+// the snapshot reflects only what the Predator 2000W's LCD displays.  The
+// Predator does not expose pack voltage, current, per-cell, or temperature
+// over its bus — only the human-readable LCD fields below.  The full set
+// of removed VESC-era fields is kept here as commented stubs in case we
+// re-add a richer BMS path later.
 export interface TelemetrySnapshot {
-  // Battery — sourced from VESC Harmony 16 over CAN
-  battery_soc: number;             // 0–100 %
-  battery_voltage: number;         // pack V
-  battery_current: number;         // pack A — positive = discharge, negative = charge
-  battery_temp: number;            // °C (pack average)
-  battery_power: number;           // V × I, signed W
-  cells?: CellPack;                // optional richer cell breakdown
-  cycleCount?: number;             // BMS-reported cycles
-  bmsFaults?: string[];            // active fault codes from the BMS
+  // Battery — what the Predator LCD reports.  battery_soc is null when the
+  // current (reg00, reg01) byte pair is not yet in the decoder's lookup
+  // table; the publisher logs every unknown pair so the table grows over
+  // normal use.  The scheduler safe-defaults to idle when soc is null.
+  battery_soc: number | null;      // 0–100 % (or null if unmapped)
 
-  // Inverter — not yet integrated (phase 2). Pi sends nulls / zeros until then.
-  inverter_power?: number;         // W
-  inverter_voltage?: number;       // V AC RMS
-  inverter_frequency?: number;     // Hz
-  inverter_load_percent?: number;  // 0–100 %
+  // Output state derived from the LCD
+  dc_active: boolean;              // DC outlet button enabled
+  ac_active: boolean;              // AC outlet button enabled (heuristic)
+  output_mode: 'AC' | 'DC' | 'AC+DC' | 'off';
+  output_watts: number | null;     // current draw in watts (null if any digit unmapped)
+  time_to_empty_minutes: number | null;  // remaining runtime, null when LCD shows the 99:59 placeholder
 
-  // Outlets — relay state, 1-indexed channels (phase 1)
-  outlets?: Record<string, boolean>;
+  // Optional / future
+  bmsFaults?: string[];            // active fault codes (empty until LCD fault icons are mapped)
+  outlets?: Record<string, boolean>;  // relay state, 1-indexed channels
+
+  // Diagnostics
+  lcd_frame_rate_hz?: number;      // observed I²C frame rate
+  raw_frame_hex?: string;          // 18-byte hex dump, for ongoing decoder dev
 
   // System
   system_mode: SystemMode;

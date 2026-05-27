@@ -93,7 +93,7 @@ export function DashboardScreen() {
             <Text style={styles.heroUnit}>%</Text>
           </View>
           <Text style={styles.heroSub}>
-            STATE OF CHARGE  ·  {fmt(snapshot.battery_voltage, 1)} V  ·  {fmt(snapshot.battery_current, 1)} A
+            STATE OF CHARGE  ·  {snapshot.output_mode.toUpperCase()}  ·  {fmt(snapshot.output_watts, 0)} W
           </Text>
         </CornerBrackets>
 
@@ -106,29 +106,31 @@ export function DashboardScreen() {
           </Text>
         </View>
 
-        {snapshot.cells ? (
-          <View style={styles.metricGroup}>
-            <Eyebrow parts={['Cells', `${snapshot.cells.voltages.length} × LiFePO4`, `Δ ${fmt(snapshot.cells.voltageDelta, 3)} V`]} />
-            <View style={styles.metricRow}>
-              <Text style={styles.metricBig}>{fmt(snapshot.cells.voltageMin, 3)}</Text>
-              <Text style={styles.metricUnit}>V min</Text>
-            </View>
-            <Text style={styles.metricSub}>
-              MAX {fmt(snapshot.cells.voltageMax, 3)} V  ·  TEMP {fmt(snapshot.cells.tempAvg, 1)} °C
-            </Text>
-          </View>
-        ) : null}
-
         <View style={styles.metricGroup}>
-          <Eyebrow parts={['Battery power']} />
+          <Eyebrow parts={['Output power']} />
           <View style={styles.metricRow}>
-            <Text style={styles.metricBig}>
-              {snapshot.battery_power >= 0 ? '' : '−'}{fmt(Math.abs(snapshot.battery_power), 0)}
-            </Text>
+            <Text style={styles.metricBig}>{fmt(snapshot.output_watts, 0)}</Text>
             <Text style={styles.metricUnit}>W</Text>
           </View>
           <Text style={styles.metricSub}>
-            {snapshot.battery_current >= 0 ? 'DRAWING' : 'CHARGING'}  ·  PACK {fmt(snapshot.battery_temp, 1)} °C
+            {snapshot.dc_active ? 'DC ●' : 'DC ○'}  ·  {snapshot.ac_active ? 'AC ●' : 'AC ○'}
+          </Text>
+        </View>
+
+        <View style={styles.metricGroup}>
+          <Eyebrow parts={['Time to empty']} />
+          <View style={styles.metricRow}>
+            <Text style={styles.metricBig}>
+              {snapshot.time_to_empty_minutes === null || snapshot.time_to_empty_minutes === undefined
+                ? '—'
+                : `${Math.floor(snapshot.time_to_empty_minutes / 60)}:${String(snapshot.time_to_empty_minutes % 60).padStart(2, '0')}`}
+            </Text>
+            <Text style={styles.metricUnit}>h:mm</Text>
+          </View>
+          <Text style={styles.metricSub}>
+            {snapshot.lcd_frame_rate_hz
+              ? `LCD ${snapshot.lcd_frame_rate_hz.toFixed(1)} Hz`
+              : 'LCD —'}
           </Text>
         </View>
 
