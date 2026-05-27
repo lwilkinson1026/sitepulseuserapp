@@ -46,12 +46,21 @@ from typing import Optional, TypedDict
 
 # Time-to-empty digits (regs 0x0B, 0x0C, 0x0D, 0x0E).  Bit 7 of reg 0x0C is
 # the colon segment between the second and third digit.
+#
+# Bit→segment mapping derived from observed states (g=bit3, f=bit5):
+#     bit 0 = d   bit 4 = b
+#     bit 1 = c   bit 5 = f
+#     bit 2 = e   bit 6 = a
+#     bit 3 = g   bit 7 = colon
 _TIME_DIGITS = {
     0x00: " ",
     0x12: "1",
     0x3A: "4",
     0x52: "7",
+    0x5B: "3",   # predicted from segment mapping; observe to confirm
+    0x5D: "2",   # confirmed during live sniff (time = "52:04" / "45:51")
     0x6B: "5",
+    0x6F: "6",   # predicted from segment mapping; observe to confirm
     0x77: "0",
     0x7B: "9",
     0x7F: "8",
