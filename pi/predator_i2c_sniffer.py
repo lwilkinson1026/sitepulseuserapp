@@ -13,9 +13,12 @@ push completed transactions into a thread-safe queue that the publisher
 drains in its main loop.
 
 Wiring (Pi 5):
-    GPIO 23 (pin 16) — SDA, splice to the LCD's white wire
-    GPIO 22 (pin 15) — SCL, splice to the LCD's yellow wire
-    GND     (pin 6)  — splice to the LCD's green wire
+    GPIO 22 (pin 15) — SDA, splice to the LCD's white wire
+    GPIO 23 (pin 16) — SCL, splice to the LCD's yellow wire
+    GND     (pin 6)  — splice to the LCD's green wire (MUST be a real GND
+                        pin — pin 6, 9, 14, 20, 25, 30, 34, or 39 — NOT an
+                        IOnn pin, or the Pi inputs will float and pick up
+                        garbage)
     DO NOT connect any Pi power rail to the Predator harness.
 
 We deliberately avoid GPIO 2/3 (the kernel's i2c-1 bus) because the PCA9685
@@ -42,8 +45,8 @@ except ImportError:
     lgpio = None  # graceful fallback for off-Pi development / unit tests
 
 
-SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "23"))
-SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "22"))
+SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "22"))
+SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "23"))
 GPIO_CHIP        = int(os.environ.get("SITEPULSE_PREDATOR_GPIO_CHIP", "0"))
 WATCH_ADDRESS    = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 

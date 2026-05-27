@@ -16,8 +16,8 @@ Environment=SITEPULSE_SA=/home/lwilkinson/sitepulse/service-account.json
 # or by writing a drop-in:
 #   sudo systemctl edit sitepulse-publisher.service
 # Defaults baked into the Python module itself if these are unset.
-Environment=SITEPULSE_PREDATOR_SDA_PIN=23
-Environment=SITEPULSE_PREDATOR_SCL_PIN=22
+Environment=SITEPULSE_PREDATOR_SDA_PIN=22
+Environment=SITEPULSE_PREDATOR_SCL_PIN=23
 Environment=SITEPULSE_PREDATOR_ADDR=0x3E
 Environment=SITEPULSE_INTERVAL=3
 ExecStart=/usr/bin/python3 -u /home/lwilkinson/sitepulse/firebase_publisher.py
