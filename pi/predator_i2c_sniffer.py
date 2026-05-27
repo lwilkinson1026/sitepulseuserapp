@@ -13,8 +13,8 @@ push completed transactions into a thread-safe queue that the publisher
 drains in its main loop.
 
 Wiring (Pi 5):
-    GPIO 22 (pin 15) — SDA, splice to the LCD's white wire
-    GPIO 23 (pin 16) — SCL, splice to the LCD's yellow wire
+    GPIO 23 (pin 16) — SDA, splice to the LCD's white wire
+    GPIO 22 (pin 15) — SCL, splice to the LCD's yellow wire
     GND     (pin 6)  — splice to the LCD's green wire
     DO NOT connect any Pi power rail to the Predator harness.
 
@@ -42,8 +42,8 @@ except ImportError:
     lgpio = None  # graceful fallback for off-Pi development / unit tests
 
 
-SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "22"))
-SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "23"))
+SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "23"))
+SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "22"))
 GPIO_CHIP        = int(os.environ.get("SITEPULSE_PREDATOR_GPIO_CHIP", "0"))
 WATCH_ADDRESS    = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 
@@ -218,10 +218,19 @@ class PassiveI2cSniffer:
         if h is None:
             return
         try:
+            # lgpio.callback() returns a _callback OBJECT (not an int) — cancel
+            # it via the object's .cancel() method, not a module-level function.
+            # (lgpio.callback_cancel does NOT exist; that was an earlier bug.)
             if self._sda_cb_id is not None:
-                lgpio.callback_cancel(self._sda_cb_id)
+                try:
+                    self._sda_cb_id.cancel()
+                except Exception:
+                    pass
             if self._scl_cb_id is not None:
-                lgpio.callback_cancel(self._scl_cb_id)
+                try:
+                    self._scl_cb_id.cancel()
+                except Exception:
+                    pass
         finally:
             lgpio.gpiochip_close(h)
             self._handle = None
