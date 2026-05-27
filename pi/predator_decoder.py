@@ -104,7 +104,9 @@ _BATTERY_SOC_LOOKUP: dict[tuple[int, int], int] = {
 class DecodedFrame(TypedDict):
     """Result of decoding one 18-byte register snapshot."""
     battery_soc:           Optional[int]   # 0-100, None if SoC bytes are unmapped
-    output_mode:           str             # "AC", "DC", "off"
+    dc_active:             bool            # DC outlet button currently enabled (bit 7 of reg 0x11)
+    ac_active:             bool            # AC outlet button currently enabled (deduced from bus pattern)
+    output_mode:           str             # "AC", "DC", "AC+DC", "off" (derived for app convenience)
     output_watts:          Optional[int]   # current draw, None if any digit unmapped
     time_to_empty_minutes: Optional[int]   # parsed HH:MM, None if unmapped or colon missing
     system_mode:           str             # "discharging", "idle" (matches scheduler.py)
@@ -164,14 +166,26 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
             f"— add to _BATTERY_SOC_LOOKUP"
         )
 
-    # ── output mode (DC / AC / off) ───────────────────────────────────────
-    # reg 0x07 bit 0 → any output is on.  bit 7 of reg 0x11 disambiguates
-    # DC from AC: it's set only in DC mode.
+    # ── output mode (DC / AC / both / off) ────────────────────────────────
+    # bit 7 of reg 0x11 is the DC outlet button indicator (set when DC is
+    # toggled on, independent of whether the AC outlet is also enabled).
+    # AC active is detected by ANY watts being drawn that isn't DC's draw —
+    # but since we don't easily distinguish, we currently use reg 0x07 bit 0
+    # as "some output active" and infer AC by elimination.  This is imperfect
+    # when both are on; future work: identify the AC-specific bit.
     output_active = bool(regs[0x07] & 0x01)
-    dc_indicator  = bool(regs[0x11] & 0x80)
+    dc_active     = bool(regs[0x11] & 0x80)
+    # If output is active but DC isn't, AC must be.  When both could be on,
+    # this still flags AC correctly as long as DC isn't the only output.
+    ac_active     = output_active and not dc_active
+    # When both are on we currently can't see it from one byte; the publisher
+    # log + raw_frame_hex helps refine this as more states are observed.
+
     if not output_active:
         output_mode = "off"
-    elif dc_indicator:
+    elif dc_active and ac_active:
+        output_mode = "AC+DC"
+    elif dc_active:
         output_mode = "DC"
     else:
         output_mode = "AC"
@@ -227,6 +241,8 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
 
     return DecodedFrame(
         battery_soc=battery_soc,
+        dc_active=dc_active,
+        ac_active=ac_active,
         output_mode=output_mode,
         output_watts=output_watts,
         time_to_empty_minutes=time_to_empty_minutes,

@@ -93,6 +93,8 @@ def build_snapshot() -> Optional[dict]:
 
     snap: dict = {
         "battery_soc":           decoded["battery_soc"],
+        "dc_active":             decoded["dc_active"],
+        "ac_active":             decoded["ac_active"],
         "output_mode":           decoded["output_mode"],
         "output_watts":          decoded["output_watts"],
         "time_to_empty_minutes": decoded["time_to_empty_minutes"],
