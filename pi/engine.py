@@ -1,15 +1,21 @@
 """
-Engine start orchestrator (phase G.2 + G.3).
+Engine lifecycle orchestrator (phase G.2 + G.3 + G.4).
 
-Two public command handlers:
+Four public command handlers:
 
-  handle_engine_crank — low-level: crank only. No choke or spark management.
-                        Useful for bench testing.
-  handle_engine_start — full choreography: choke set → spark relay on →
-                        crank → (on catch) stabilize + open choke,
-                        (on failure) reset choke + spark off.
+  handle_engine_crank  — low-level: crank only. No choke or spark management.
+  handle_engine_start  — full start choreography: choke → spark → crank.
+  handle_engine_charge — apply regen load to a running engine to charge the
+                         pack until voltage threshold. Runs as a background
+                         thread; returns immediately after spawning.
+  handle_engine_stop   — graceful shutdown: abort charge → spark off → wait
+                         for RPM to fall to idle → publish "idle".
 
-Both share the same module-level lock — only one engine action runs at a time.
+start, crank, and stop share `_engine_lock` (only one at a time). charge
+spawns a daemon thread (`_charge_thread`) so it doesn't hold the lock —
+the long-running loop is monitored via `_charge_abort` (signal stop) and
+`_charge_active` (is it running?). start/crank refuse to run while
+_charge_active is set; stop is the only thing that can interrupt it.
 
 The crank primitive
 -------------------
@@ -66,7 +72,7 @@ from typing import Any, Dict, Optional
 
 from firebase_admin import firestore
 
-from vesc_listener import CMD_STATUS_1
+from vesc_listener import CMD_STATUS_1, CMD_STATUS_4, CMD_STATUS_5
 from vesc_sender import VescSender
 
 
@@ -104,8 +110,15 @@ DEFAULT_CRANK_CONFIG: Dict[str, Any] = {
 VESC_IFACE   = os.environ.get("SITEPULSE_VESC_IFACE", "can0")
 VESC_UNIT_ID = int(os.environ.get("SITEPULSE_VESC_UNIT_ID", "0"))
 
-# Module-level mutex: only one engine action (crank or start) runs at a time.
+# Module-level mutex: only one synchronous engine action (start/crank/stop)
+# runs at a time. The charge loop runs in a background thread WITHOUT
+# holding this lock — it's gated separately by `_charge_active`.
 _engine_lock = threading.Lock()
+
+# Charge thread state
+_charge_thread: Optional[threading.Thread] = None
+_charge_abort  = threading.Event()   # set to request the charge loop exit
+_charge_active = threading.Event()   # set while charge thread is running
 
 
 # Defaults for the start macro. Mirror seed_config.py's `engine.start` block.
@@ -119,6 +132,47 @@ DEFAULT_START_CONFIG: Dict[str, Any] = {
     "postCatchSettleMs":       2000,          # pause between catch and run-choke
     "turnOffSparkOnFailure":   True,
 }
+
+
+# Defaults for the charge loop (phase G.4). Mirror config/engine.charge.
+DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
+    # Amps to extract from the motor (generator mode). Sent as negative
+    # SET_CURRENT. Conservative default so the engine isn't bogged down
+    # before we know what it can sustain.
+    "currentAmps":      10.0,
+    # Voltage thresholds. Pack voltage as reported by the VESC.
+    # 14S LiFePO4: ~58 V full, ~54 V is ~90 % SOC, ~46 V is ~10 % SOC.
+    "voltageStop":      54.0,    # exit charge loop when pack rises above this
+    "voltageMinAbort":  44.0,    # abort if pack falls below (engine not generating)
+    # Safety ceiling — even with no other exit, charge dies after this much
+    # wall-clock time. One hour by default. Code clamps to 2 hours hard max.
+    "maxDurationSec":   3600,
+    # Watchdog refresh rate for SET_CURRENT.
+    "refreshHz":        10,
+    # Engine RPM minimum. If RPM drops below this, the engine is being
+    # bogged down — abort to avoid stalling.
+    "minRpmForLoad":    800,
+    # Temperature safety. Abort if either exceeds.
+    "maxFetTempC":      80.0,
+    "maxMotorTempC":    100.0,
+    # Ramp up the load gradually so the engine doesn't get hit with full
+    # regen current instantly.
+    "rampUpSec":        2.0,
+}
+
+
+# Defaults for the stop primitive.
+DEFAULT_STOP_CONFIG: Dict[str, Any] = {
+    "rpmIdleThreshold":  100,    # motor_rpm considered "stopped"
+    "rpmWaitTimeoutSec": 15,     # max time we'll wait for engine to coast down
+    "sparkRelayChannel": 2,      # mirror engine.start.sparkRelayChannel
+    "chargeJoinTimeoutSec": 5,   # how long stop waits for the charge thread to exit
+}
+
+
+# Charge hard ceilings (cannot be exceeded by config)
+MAX_CHARGE_AMPS_HARD      = 50.0
+MAX_CHARGE_DURATION_HARD  = 7200.0   # 2 hours absolute
 
 
 # ─── config + state helpers ────────────────────────────────────────────────
@@ -144,6 +198,30 @@ def _load_start_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
             cfg.update(block)
     except Exception as e:
         print(f"[engine] config/engine.start read failed, using defaults: {e}", flush=True)
+    return cfg
+
+
+def _load_charge_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
+    cfg = dict(DEFAULT_CHARGE_CONFIG)
+    try:
+        snap = db.document(f"units/{unit_id}/config/engine").get()
+        if snap.exists:
+            block = (snap.to_dict() or {}).get("charge", {})
+            cfg.update(block)
+    except Exception as e:
+        print(f"[engine] config/engine.charge read failed, using defaults: {e}", flush=True)
+    return cfg
+
+
+def _load_stop_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
+    cfg = dict(DEFAULT_STOP_CONFIG)
+    try:
+        snap = db.document(f"units/{unit_id}/config/engine").get()
+        if snap.exists:
+            block = (snap.to_dict() or {}).get("stop", {})
+            cfg.update(block)
+    except Exception as e:
+        print(f"[engine] config/engine.stop read failed, using defaults: {e}", flush=True)
     return cfg
 
 
@@ -356,6 +434,10 @@ def handle_engine_crank(
         raise RuntimeError("engine.crank: already in progress")
 
     try:
+        if _charge_active.is_set():
+            raise RuntimeError(
+                "engine.crank: charge loop is active; engine.stop first"
+            )
         cfg    = _load_crank_config(db, unit_id)
         params = _resolve_crank_params(cfg, payload)
 
@@ -418,6 +500,10 @@ def handle_engine_start(
         raise RuntimeError("engine.start: already in progress")
 
     try:
+        if _charge_active.is_set():
+            raise RuntimeError(
+                "engine.start: charge loop is active; engine.stop first"
+            )
         start_cfg     = _load_start_config(db, unit_id)
         crank_cfg     = _load_crank_config(db, unit_id)
         crank_params  = _resolve_crank_params(crank_cfg, payload)
@@ -520,5 +606,326 @@ def handle_engine_start(
                 flush=True,
             )
 
+    finally:
+        _engine_lock.release()
+
+
+# ─── charge loop (background thread, phase G.4) ────────────────────────────
+
+def _resolve_charge_params(
+    cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Combine config + payload overrides, clamp to hard ceilings."""
+    current_amps = float(payload.get("currentAmpsOverride", cfg.get("currentAmps", 10)))
+    voltage_stop = float(payload.get("voltageStopOverride", cfg.get("voltageStop", 54)))
+    max_dur      = float(payload.get("maxDurationSecOverride", cfg.get("maxDurationSec", 3600)))
+
+    return {
+        "current_amps":      max(0.0, min(MAX_CHARGE_AMPS_HARD, current_amps)),
+        "voltage_stop":      voltage_stop,
+        "voltage_min_abort": float(cfg.get("voltageMinAbort", 44.0)),
+        "max_duration_sec":  max(1.0, min(MAX_CHARGE_DURATION_HARD, max_dur)),
+        "refresh_hz":        max(MIN_REFRESH_HZ, min(MAX_REFRESH_HZ, int(cfg.get("refreshHz", 10)))),
+        "min_rpm_for_load":  int(cfg.get("minRpmForLoad", 800)),
+        "max_fet_temp_c":    float(cfg.get("maxFetTempC", 80.0)),
+        "max_motor_temp_c":  float(cfg.get("maxMotorTempC", 100.0)),
+        "ramp_up_sec":       max(0.0, float(cfg.get("rampUpSec", 2.0))),
+    }
+
+
+def _run_charge_loop(
+    db: firestore.Client,
+    unit_id: str,
+    params: Dict[str, Any],
+) -> None:
+    """Long-running charge loop. Sends SET_CURRENT(-currentAmps) at
+    refresh_hz, reads STATUS frames inline, exits on any of:
+      - voltage rises above voltage_stop  → state="idle" (success)
+      - voltage falls below voltage_min_abort → state="failed_low_voltage"
+      - RPM falls below min_rpm_for_load   → state="failed_engine_bogged"
+      - FET or motor temp exceeds limit    → state="failed_overtemp"
+      - max_duration_sec exceeded          → state="failed_timeout"
+      - _charge_abort signaled (engine.stop) → state="stopped"
+    """
+    target_amps     = params["current_amps"]
+    voltage_stop    = params["voltage_stop"]
+    voltage_min     = params["voltage_min_abort"]
+    max_dur         = params["max_duration_sec"]
+    refresh_hz      = params["refresh_hz"]
+    min_rpm         = params["min_rpm_for_load"]
+    max_fet_temp    = params["max_fet_temp_c"]
+    max_motor_temp  = params["max_motor_temp_c"]
+    ramp_up_sec     = params["ramp_up_sec"]
+
+    refresh_interval = 1.0 / refresh_hz
+
+    sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
+    try:
+        sender.open()
+        bus = sender._bus  # noqa: SLF001
+
+        status1_id = (CMD_STATUS_1 << 8) | (sender.unit_id & 0xFF)
+        status4_id = (CMD_STATUS_4 << 8) | (sender.unit_id & 0xFF)
+        status5_id = (CMD_STATUS_5 << 8) | (sender.unit_id & 0xFF)
+
+        started_at        = time.monotonic()
+        last_send_at      = 0.0
+        last_volts        = None
+        last_rpm          = None
+        last_fet_temp     = None
+        last_motor_temp   = None
+        peak_volts        = 0.0
+
+        result_state    = None
+        result_metadata: Dict[str, Any] = {}
+
+        _publish_state(db, unit_id, "charging", {
+            "startedAt":            firestore.SERVER_TIMESTAMP,
+            "currentAmpsCommanded": target_amps,
+            "voltageStop":          voltage_stop,
+            "maxDurationSec":       max_dur,
+        })
+
+        while not _charge_abort.is_set():
+            now      = time.monotonic()
+            elapsed  = now - started_at
+
+            if elapsed >= max_dur:
+                result_state    = "failed_timeout"
+                result_metadata = {"durationSec": round(elapsed, 1)}
+                break
+
+            # Ramp the commanded amps up over ramp_up_sec so the engine
+            # doesn't take a sudden full-regen hit.
+            if now - last_send_at >= refresh_interval:
+                if ramp_up_sec > 0 and elapsed < ramp_up_sec:
+                    ramp_fraction = elapsed / ramp_up_sec
+                else:
+                    ramp_fraction = 1.0
+                # Negative SET_CURRENT = regen / generator mode = charge pack.
+                sender.set_current(-target_amps * ramp_fraction)
+                last_send_at = now
+
+            msg = bus.recv(timeout=0.01)
+            if msg is None:
+                continue
+            if not msg.is_extended_id or len(msg.data) < 8:
+                continue
+
+            arb = msg.arbitration_id
+            if arb == status1_id:
+                last_rpm = struct.unpack(">i", msg.data[0:4])[0]
+            elif arb == status4_id:
+                last_fet_temp   = struct.unpack(">h", msg.data[0:2])[0] / 10.0
+                last_motor_temp = struct.unpack(">h", msg.data[2:4])[0] / 10.0
+            elif arb == status5_id:
+                last_volts = struct.unpack(">h", msg.data[4:6])[0] / 10.0
+                if last_volts > peak_volts:
+                    peak_volts = last_volts
+
+            # Safety checks only meaningful past the ramp-up window.
+            if elapsed <= ramp_up_sec:
+                continue
+
+            if last_volts is not None and last_volts >= voltage_stop:
+                result_state    = "idle"
+                result_metadata = {
+                    "reason":       "voltage_stop_reached",
+                    "durationSec":  round(elapsed, 1),
+                    "peakVoltage":  round(peak_volts, 2),
+                    "finalVoltage": round(last_volts, 2),
+                }
+                break
+            if last_volts is not None and last_volts <= voltage_min:
+                result_state    = "failed_low_voltage"
+                result_metadata = {
+                    "finalVoltage": round(last_volts, 2),
+                    "durationSec":  round(elapsed, 1),
+                }
+                break
+            if last_rpm is not None and last_rpm < min_rpm:
+                result_state    = "failed_engine_bogged"
+                result_metadata = {
+                    "finalRpm":    last_rpm,
+                    "durationSec": round(elapsed, 1),
+                }
+                break
+            if last_fet_temp is not None and last_fet_temp >= max_fet_temp:
+                result_state    = "failed_overtemp"
+                result_metadata = {
+                    "fetTempC":    round(last_fet_temp, 1),
+                    "durationSec": round(elapsed, 1),
+                }
+                break
+            # Only respect motor temp if the reading looks plausible —
+            # a disconnected probe reports ~388 °C and would always trip.
+            if (
+                last_motor_temp is not None
+                and last_motor_temp >= max_motor_temp
+                and last_motor_temp < 250.0
+            ):
+                result_state    = "failed_overtemp"
+                result_metadata = {
+                    "motorTempC":  round(last_motor_temp, 1),
+                    "durationSec": round(elapsed, 1),
+                }
+                break
+
+        if _charge_abort.is_set() and result_state is None:
+            result_state    = "stopped"
+            result_metadata = {
+                "reason":      "abort_signaled",
+                "durationSec": round(time.monotonic() - started_at, 1),
+                "peakVoltage": round(peak_volts, 2),
+            }
+
+        try:
+            sender.release()
+        except Exception:
+            pass
+
+        _publish_state(db, unit_id, result_state or "idle", result_metadata)
+        print(
+            f"[engine] charge done: state={result_state!r} meta={result_metadata}",
+            flush=True,
+        )
+
+    except Exception as e:
+        try:
+            sender.release()
+        except Exception:
+            pass
+        _publish_state(db, unit_id, "failed_error", {"error": str(e), "phase": "charging"})
+        print(f"[engine] charge failed with exception: {e!r}", flush=True)
+    finally:
+        try:
+            sender.close()
+        except Exception:
+            pass
+        _charge_active.clear()
+
+
+def handle_engine_charge(
+    db: firestore.Client,
+    unit_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Spawn the background charge loop. Returns immediately.
+
+    Pre-condition: engine should be running. We don't enforce — if it
+    isn't, the charge loop will bail quickly on min-RPM check.
+
+    payload (all optional):
+      currentAmpsOverride
+      voltageStopOverride
+      maxDurationSecOverride
+    """
+    global _charge_thread
+
+    if not _engine_lock.acquire(blocking=False):
+        raise RuntimeError("engine.charge: another engine action in progress")
+    try:
+        if _charge_active.is_set():
+            raise RuntimeError("engine.charge: already charging")
+
+        cfg    = _load_charge_config(db, unit_id)
+        params = _resolve_charge_params(cfg, payload)
+
+        _charge_abort.clear()
+        _charge_active.set()
+        _charge_thread = threading.Thread(
+            target=_run_charge_loop,
+            args=(db, unit_id, params),
+            daemon=True,
+            name="engine-charge",
+        )
+        _charge_thread.start()
+        print(
+            f"[engine] charge spawned: targetAmps={params['current_amps']} "
+            f"voltageStop={params['voltage_stop']} max={params['max_duration_sec']}s",
+            flush=True,
+        )
+    finally:
+        _engine_lock.release()
+
+
+# ─── stop primitive (phase G.4) ────────────────────────────────────────────
+
+def _wait_for_rpm_idle(threshold: int, timeout_sec: float) -> Optional[int]:
+    """After spark relay opens, watch the bus for RPM to fall under threshold.
+    Returns the last RPM observed (or None if no STATUS_1 frame arrived)."""
+    sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
+    try:
+        sender.open()
+        bus = sender._bus  # noqa: SLF001
+        status1_id = (CMD_STATUS_1 << 8) | (sender.unit_id & 0xFF)
+        deadline = time.monotonic() + timeout_sec
+        last_rpm: Optional[int] = None
+        while time.monotonic() < deadline:
+            msg = bus.recv(timeout=0.2)
+            if msg is None or not msg.is_extended_id or len(msg.data) < 8:
+                continue
+            if msg.arbitration_id != status1_id:
+                continue
+            last_rpm = struct.unpack(">i", msg.data[0:4])[0]
+            if abs(last_rpm) <= threshold:
+                return last_rpm
+        return last_rpm
+    finally:
+        sender.close()
+
+
+def handle_engine_stop(
+    db: firestore.Client,
+    unit_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Graceful engine shutdown:
+      1. Signal any active charge loop to abort, wait for it.
+      2. Turn off the spark relay.
+      3. Watch RPM until it falls under rpmIdleThreshold or timeout.
+      4. Publish state = "idle".
+
+    Safe to call when the engine isn't actually running — just signals
+    and de-energizes whatever's on. No payload options for v1.
+    """
+    # If a charge loop is running, signal abort WITHOUT holding _engine_lock:
+    # the charge thread doesn't hold it either, and we need to give the
+    # thread room to release the motor before we acquire the lock.
+    if _charge_active.is_set():
+        _charge_abort.set()
+        if _charge_thread is not None:
+            join_timeout = float(
+                _load_stop_config(db, unit_id).get("chargeJoinTimeoutSec", 5)
+            )
+            _charge_thread.join(timeout=join_timeout)
+
+    if not _engine_lock.acquire(blocking=False):
+        raise RuntimeError("engine.stop: another engine action in progress")
+
+    try:
+        stop_cfg      = _load_stop_config(db, unit_id)
+        spark_channel = int(stop_cfg.get("sparkRelayChannel", 2))
+        idle_thresh   = int(stop_cfg.get("rpmIdleThreshold", 100))
+        rpm_timeout   = float(stop_cfg.get("rpmWaitTimeoutSec", 15))
+
+        _publish_state(db, unit_id, "stopping", {
+            "startedAt": firestore.SERVER_TIMESTAMP,
+        })
+
+        try:
+            _set_spark_safely(db, unit_id, spark_channel, "off")
+        except Exception as e:
+            print(f"[engine.stop] spark off failed: {e!r}", flush=True)
+
+        final_rpm = _wait_for_rpm_idle(idle_thresh, rpm_timeout)
+
+        _publish_state(db, unit_id, "idle", {
+            "stoppedAt": firestore.SERVER_TIMESTAMP,
+            "finalRpm":  final_rpm if final_rpm is not None else "unknown",
+            "trigger":   "manual_stop",
+        })
+        print(f"[engine] stop complete: final_rpm={final_rpm}", flush=True)
     finally:
         _engine_lock.release()

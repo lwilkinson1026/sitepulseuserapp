@@ -105,6 +105,9 @@ HANDLERS: Dict[str, Handler] = {
     "engine.crank":      _lazy("engine",  "handle_engine_crank",      "engine.crank"),
     # Phase G.3 — full engine start choreography: choke → spark → crank → settle
     "engine.start":      _lazy("engine",  "handle_engine_start",      "engine.start"),
+    # Phase G.4 — regen charging + graceful stop
+    "engine.charge":     _lazy("engine",  "handle_engine_charge",     "engine.charge"),
+    "engine.stop":       _lazy("engine",  "handle_engine_stop",       "engine.stop"),
     # Legacy / phase 1 — already-shipped outlet relays
     "outlet.toggle":     _not_implemented("outlet.toggle"),
     "theft.arm":         _not_implemented("theft.arm"),

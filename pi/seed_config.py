@@ -144,6 +144,49 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # engine isn't sitting with the ignition energized.
             "turnOffSparkOnFailure": True,
         },
+        # Regen charging (engine.charge command). Runs in a background
+        # thread on the Pi; engine.stop is the only thing that can
+        # interrupt it once started (other than the safety exits below).
+        "charge": {
+            # Amps to extract from the motor. Sent as a NEGATIVE
+            # SET_CURRENT to the VESC (positive = drive, negative = regen).
+            # Conservative default so the engine isn't bogged down before
+            # we know what it can sustain.
+            "currentAmps":      10.0,
+            # Pack voltage to stop at (charge complete). 14S LiFePO4 ~54 V
+            # corresponds to ~90 % SOC. Tune empirically.
+            "voltageStop":      54.0,
+            # Abort if pack voltage falls below this while loaded —
+            # means the engine isn't generating enough.
+            "voltageMinAbort":  44.0,
+            # Hard ceiling on charge duration. Code clamps to 2 hours.
+            "maxDurationSec":   3600,    # 1 hour
+            "refreshHz":        10,
+            # Engine RPM minimum. Bog-down protection — abort if the load
+            # drags the engine below this.
+            "minRpmForLoad":    800,
+            # Temperature safety ceilings. Motor temp only respected when
+            # the reading looks plausible (<250°C) — disconnected probes
+            # report ~388°C and would trip every attempt.
+            "maxFetTempC":      80.0,
+            "maxMotorTempC":    100.0,
+            # Ramp the load up gradually so the engine doesn't take a
+            # sudden full-regen hit.
+            "rampUpSec":        2.0,
+        },
+        # Graceful shutdown (engine.stop command).
+        "stop": {
+            # Motor RPM below this is considered "stopped".
+            "rpmIdleThreshold":     100,
+            # Max time we'll wait for the engine to coast down after
+            # spark relay opens. After this, we publish "idle" regardless.
+            "rpmWaitTimeoutSec":    15,
+            # Mirror engine.start.sparkRelayChannel.
+            "sparkRelayChannel":    2,
+            # How long stop waits for the charge thread to release the
+            # motor after signaling abort.
+            "chargeJoinTimeoutSec": 5,
+        },
     },
     "charge": {
         "enabled": False,

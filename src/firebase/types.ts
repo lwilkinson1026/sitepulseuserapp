@@ -115,7 +115,10 @@ export type CommandKind =
   // VESC starter cranking (phase G.2)
   | 'engine.crank'
   // Full engine start choreography (phase G.3): choke → spark → crank → settle
-  | 'engine.start';
+  | 'engine.start'
+  // Regen charging + graceful shutdown (phase G.4)
+  | 'engine.charge'
+  | 'engine.stop';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';
 

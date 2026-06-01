@@ -157,3 +157,26 @@ export function startEngine(
   if (override?.maxDurationSec !== undefined) payload.maxDurationSecOverride = override.maxDurationSec;
   return issueCommand(unitId, uid, 'engine.start', payload);
 }
+
+// ── regen charging (phase G.4) ──────────────────────────────────────────
+// Spawn the background charge loop. Pi-side `engine.py` runs an async
+// SET_CURRENT(-N) loop with voltage / RPM / temperature safety checks.
+// Returns once the loop is spawned (the actual charging runs for minutes
+// to hours). Use stopEngine() to interrupt.
+export function chargeEngine(
+  unitId: string,
+  uid: string,
+  override?: { currentAmps?: number; voltageStop?: number; maxDurationSec?: number },
+) {
+  const payload: Record<string, unknown> = {};
+  if (override?.currentAmps !== undefined) payload.currentAmpsOverride = override.currentAmps;
+  if (override?.voltageStop !== undefined) payload.voltageStopOverride = override.voltageStop;
+  if (override?.maxDurationSec !== undefined) payload.maxDurationSecOverride = override.maxDurationSec;
+  return issueCommand(unitId, uid, 'engine.charge', payload);
+}
+
+// Graceful shutdown: aborts any active charge loop, opens the spark relay,
+// waits for RPM to fall under idle threshold.
+export function stopEngine(unitId: string, uid: string) {
+  return issueCommand(unitId, uid, 'engine.stop', {});
+}

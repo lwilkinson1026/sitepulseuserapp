@@ -3,7 +3,15 @@ import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 're
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useAuth } from '../../hooks/AuthContext';
-import { crankEngine, startEngine, toggleAc, wakeLcd } from '../../firebase/commands';
+import {
+  chargeEngine,
+  crankEngine,
+  startEngine,
+  stopEngine,
+  toggleAc,
+  wakeLcd,
+} from '../../firebase/commands';
+import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -98,6 +106,64 @@ export function DashboardScreen() {
     );
   };
 
+  const [chargeBusy, setChargeBusy] = useState(false);
+  const [stopBusy, setStopBusy] = useState(false);
+
+  const onChargePress = () => {
+    if (!user || chargeBusy) return;
+    Alert.alert(
+      'Begin Charging?',
+      'Engine must already be running. Will apply a regen load (default 10A) ' +
+        'and monitor pack voltage; stops automatically when voltage hits the ' +
+        'configured threshold, or you can tap Stop Engine at any time.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Charge',
+          onPress: async () => {
+            setChargeBusy(true);
+            try {
+              await chargeEngine(DEV_UNIT_ID, user.uid);
+            } catch (e) {
+              console.warn('[dashboard] chargeEngine failed', e);
+            } finally {
+              // Charge ack is fast (it just spawns the bg thread). 1.5s
+              // is enough; the actual charging continues in the background.
+              setTimeout(() => setChargeBusy(false), 1500);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const onStopPress = () => {
+    if (!user || stopBusy) return;
+    Alert.alert(
+      'Stop Engine?',
+      'Aborts any active charge loop, opens the spark relay, and waits for ' +
+        'the engine to coast to a stop.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Stop',
+          style: 'destructive',
+          onPress: async () => {
+            setStopBusy(true);
+            try {
+              await stopEngine(DEV_UNIT_ID, user.uid);
+            } catch (e) {
+              console.warn('[dashboard] stopEngine failed', e);
+            } finally {
+              // Stop sequence includes up to 15s RPM-wait — lock out longer.
+              setTimeout(() => setStopBusy(false), 18000);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const onStartPress = () => {
     if (!user || startBusy) return;
     Alert.alert(
@@ -169,7 +235,14 @@ export function DashboardScreen() {
     );
   }
 
-  const socStr = fmt(snapshot.battery_soc, 0);
+  // SOC display priority: LCD reading first (accurate when fresh); fall
+  // back to VESC-voltage-derived estimate so we always have *something*
+  // to show during the windows when the Predator LCD is asleep.
+  const vescSoc = vescVoltsToSoc(snapshot.motor_volts);
+  const usingVescFallback =
+    (snapshot.battery_soc === null || snapshot.battery_soc === undefined) &&
+    vescSoc !== null;
+  const socStr = usingVescFallback ? String(vescSoc) : fmt(snapshot.battery_soc, 0);
   const stalenessKind =
     staleness === 'fresh' ? 'fresh' : staleness === 'stale' ? 'stale' : 'offline';
 
@@ -191,7 +264,7 @@ export function DashboardScreen() {
             <Text style={styles.heroUnit}>%</Text>
           </View>
           <Text style={styles.heroSub}>
-            STATE OF CHARGE  ·  {snapshot.output_mode.toUpperCase()}  ·  {fmt(snapshot.output_watts, 0)} W
+            STATE OF CHARGE{usingVescFallback ? '  (APPROX)' : ''}  ·  {snapshot.output_mode.toUpperCase()}  ·  {fmt(snapshot.output_watts, 0)} W
           </Text>
         </CornerBrackets>
 
@@ -247,6 +320,16 @@ export function DashboardScreen() {
             label={startBusy ? 'Starting…' : 'Start Engine'}
             onPress={onStartPress}
             disabled={startBusy || !user}
+          />
+          <SecondaryCTA
+            label={chargeBusy ? 'Engaging…' : 'Charge'}
+            onPress={onChargePress}
+            disabled={chargeBusy || !user}
+          />
+          <SecondaryCTA
+            label={stopBusy ? 'Stopping…' : 'Stop Engine'}
+            onPress={onStopPress}
+            disabled={stopBusy || !user}
           />
           <SecondaryCTA
             label={crankBusy ? 'Cranking…' : 'Crank Engine'}
