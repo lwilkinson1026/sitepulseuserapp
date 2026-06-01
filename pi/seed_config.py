@@ -153,12 +153,15 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # Conservative default so the engine isn't bogged down before
             # we know what it can sustain.
             "currentAmps":      10.0,
-            # Pack voltage to stop at (charge complete). 14S LiFePO4 ~54 V
-            # corresponds to ~90 % SOC. Tune empirically.
-            "voltageStop":      54.0,
-            # Abort if pack voltage falls below this while loaded —
-            # means the engine isn't generating enough.
-            "voltageMinAbort":  44.0,
+            # Pack voltage to stop charging (charge complete). 14S LiFePO4
+            # is ~48.0 V at 90 % SOC resting; under charge load voltage runs
+            # slightly higher than resting, so we set ~48.5 V to land near
+            # 90 % when the load is released. Tune empirically against LCD.
+            "voltageStop":      48.5,
+            # Abort if pack voltage falls below this while loaded — means
+            # the engine isn't generating enough. LiFePO4 BMS typically
+            # cuts ~2.5 V/cell = ~35 V; 42.5 V is well above that.
+            "voltageMinAbort":  42.5,
             # Hard ceiling on charge duration. Code clamps to 2 hours.
             "maxDurationSec":   3600,    # 1 hour
             "refreshHz":        10,
@@ -192,11 +195,14 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         # by default; flip enabled=true to activate.
         "supervisor": {
             "enabled":              False,
-            # 14S LiFePO4: ~46.5 V ≈ 20 % SOC, ~45.5 V ≈ 10 % SOC.
-            # Tune empirically by correlating VESC voltage to the LCD's
-            # SOC reading. Stop threshold lives in engine.charge.voltageStop.
-            "voltageStart":         46.5,   # below → auto-start in active window
-            "voltageCritical":      45.5,   # below → start even in quiet hours
+            # 14S LiFePO4 voltage targets (see src/lib/voltageSoc.ts for the
+            # full curve). 45.0 V ≈ 20 % SOC, 44.0 V ≈ 10 % SOC.
+            # The middle of the LiFePO4 curve is very flat (~46.0 V covers
+            # 30–70 % SOC), so thresholds should sit on the steeper lower
+            # end to avoid hysteresis-bouncing in the middle.
+            # Stop threshold lives in engine.charge.voltageStop.
+            "voltageStart":         45.0,   # below → auto-start in active window
+            "voltageCritical":      44.0,   # below → start even in quiet hours
                                             # (if allowQuietOverride is true)
             "tickIntervalSec":      15,
             "actionCooldownSec":    60,
