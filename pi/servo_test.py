@@ -2,7 +2,9 @@
 Bench sanity-check for one servo on the V1246 (PCA9685) board.
 
 Run on the Pi:
-    python3 -u pi/servo_test.py
+    python3 -u pi/servo_test.py            # defaults to channel 0
+    python3 -u pi/servo_test.py 1          # choke (production)
+    python3 -u pi/servo_test.py 2          # LCD wake button servo
 
 Wiring assumed:
     PCA9685 SDA -> Pi BCM 2 (SDA1)
@@ -10,7 +12,10 @@ Wiring assumed:
     PCA9685 VCC -> Pi 3.3V (logic only)
     PCA9685 GND -> Pi GND
     PCA9685 V+  -> external 5V supply (servo power; NOT the Pi 5V pin)
-    Servo signal/+/-  -> PCA9685 channel 0 header
+    Servo signal/+/-  -> PCA9685 channel header (per arg)
+
+NOTE: stop the listener first (`sudo systemctl stop sitepulse-listener`)
+or you'll be fighting it for I2C bus access.
 
 REPL commands:
     <number>   set angle (0-180 degrees)
@@ -33,7 +38,10 @@ import busio
 from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo as servo_mod
 
-CHANNEL = 0
+CHANNEL = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+if not 0 <= CHANNEL <= 15:
+    print(f"channel out of range: {CHANNEL} (PCA9685 has 0-15)", file=sys.stderr)
+    sys.exit(2)
 PWM_FREQ_HZ = 50          # standard hobby servo
 MIN_PULSE_US = 1000       # conservative; tune per servo later
 MAX_PULSE_US = 2000

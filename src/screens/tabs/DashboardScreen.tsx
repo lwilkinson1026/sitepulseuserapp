@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { CornerBrackets, Eyebrow, FigCaption, Screen } from '../../components';
+import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useAuth } from '../../hooks/AuthContext';
+import { wakeLcd } from '../../firebase/commands';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -29,6 +30,27 @@ function fmt(value: number | undefined | null, digits = 1): string {
 export function DashboardScreen() {
   const { loading, snapshot, staleness, error } = useUnitTelemetry(DEV_UNIT_ID);
   const { user } = useAuth();
+  // 'pending' covers the brief window between tap and Pi ack. We don't
+  // round-trip the ack into here yet — just debounce by time to prevent
+  // double-taps from queueing two presses back-to-back.
+  const [wakeBusy, setWakeBusy] = useState(false);
+
+  const onWakePress = async () => {
+    if (!user || wakeBusy) return;
+    setWakeBusy(true);
+    try {
+      await wakeLcd(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      // Surface via console; no in-screen error UI for a one-off bench
+      // action. If this becomes user-facing, lift into a toast.
+      console.warn('[dashboard] wakeLcd failed', e);
+    } finally {
+      // Leave the button disabled briefly so the servo has time to
+      // physically complete its press-release cycle before the user can
+      // queue another.
+      setTimeout(() => setWakeBusy(false), 1200);
+    }
+  };
 
   if (loading) {
     return (
@@ -132,6 +154,14 @@ export function DashboardScreen() {
               ? `LCD ${snapshot.lcd_frame_rate_hz.toFixed(1)} Hz`
               : 'LCD —'}
           </Text>
+        </View>
+
+        <View style={styles.actionGroup}>
+          <SecondaryCTA
+            label={wakeBusy ? 'Waking…' : 'Wake LCD'}
+            onPress={onWakePress}
+            disabled={wakeBusy || !user}
+          />
         </View>
 
         <FigCaption number={1} label="Dashboard" detail={DEV_UNIT_ID} />
@@ -248,5 +278,10 @@ const styles = StyleSheet.create({
     fontFamily: fonts.mono,
     fontSize: typeScale.monoLG,
     letterSpacing: tracking.monoCaps,
+  },
+  actionGroup: {
+    borderTopWidth: hairline,
+    borderTopColor: colors.borderHairline,
+    paddingTop: spacing.lg,
   },
 });
