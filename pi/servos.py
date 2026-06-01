@@ -460,7 +460,9 @@ def start_lcd_wake_loop(db: firestore.Client, unit_id: str) -> None:
 # only toggled on explicit user command. Each press flips the Predator's
 # AC output state; the Pi has no read-back of which state it's in.
 
-AC_TOGGLE_DEFAULT_PRESS_S = 0.25  # match LCD-wake default; override via payload
+AC_TOGGLE_DEFAULT_PRESS_S = 0.5   # longer than LCD-wake — AC power button
+                                  # needs a deliberate hold to register a
+                                  # toggle, not a quick tap. Override via payload.
 
 
 def press_ac(
