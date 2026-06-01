@@ -123,6 +123,27 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # (no motor connected → no current draw → no false catch).
             "armCurrentRatio": 0.5,
         },
+        # Full start choreography (engine.start command). Composes the
+        # cranking primitive above with choke + spark management.
+        "start": {
+            # Servo preset used during cranking (choke closed for cold start).
+            "chokePreset":           "start_cold",
+            # Preset applied after engine catches (choke open).
+            "runChokePreset":        "run",
+            # Preset applied when cranking fails so we don't leave the
+            # linkage in the closed/start position.
+            "failChokePreset":       "idle",
+            # Waveshare relay channel that controls the ignition / spark.
+            # Channel 2 = "Aux 2" per the deployed wiring.
+            "sparkRelayChannel":     2,
+            # Pause between each phase, in milliseconds.
+            "chokeSettleMs":         500,   # choke linkage to physically settle
+            "sparkSettleMs":         200,   # spark coil to energize
+            "postCatchSettleMs":     2000,  # engine to stabilize before opening choke
+            # On crank failure, turn the spark relay back off so a dead
+            # engine isn't sitting with the ignition energized.
+            "turnOffSparkOnFailure": True,
+        },
     },
     "charge": {
         "enabled": False,

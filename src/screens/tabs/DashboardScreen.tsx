@@ -3,7 +3,7 @@ import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 're
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useAuth } from '../../hooks/AuthContext';
-import { crankEngine, toggleAc, wakeLcd } from '../../firebase/commands';
+import { crankEngine, startEngine, toggleAc, wakeLcd } from '../../firebase/commands';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -65,18 +65,19 @@ export function DashboardScreen() {
     }
   };
 
-  // Cranking is dangerous enough to deserve a confirm. Disabled state
-  // covers the whole engine.crank lifetime (up to maxDurationSec ≈ 4s);
-  // we leave the button locked for 6s after firing so a double-tap can't
-  // race a still-in-flight attempt on the Pi.
+  // Both engine actions get a confirm dialog + a generous post-tap lock-out
+  // that covers the worst-case sequence duration so a double-tap can't race
+  // a still-in-flight attempt on the Pi.
   const [crankBusy, setCrankBusy] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
 
   const onCrankPress = () => {
     if (!user || crankBusy) return;
     Alert.alert(
       'Crank Engine?',
-      'This will spin the starter motor at the configured current for up to ~4 seconds. ' +
-        'Make sure the spark relay is on and the choke is set before continuing.',
+      'This is the low-level crank — it only spins the starter motor. ' +
+        'It does NOT set the choke or enable the spark relay. Use "Start Engine" ' +
+        'for a normal start; use this only for bench testing.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -90,6 +91,36 @@ export function DashboardScreen() {
               console.warn('[dashboard] crankEngine failed', e);
             } finally {
               setTimeout(() => setCrankBusy(false), 6000);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const onStartPress = () => {
+    if (!user || startBusy) return;
+    Alert.alert(
+      'Start Engine?',
+      'This will set the choke, energize the spark relay, and crank the engine. ' +
+        'On success the choke opens automatically; on failure the choke and spark ' +
+        'are reset. Make sure the area around the engine is clear.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start',
+          style: 'destructive',
+          onPress: async () => {
+            setStartBusy(true);
+            try {
+              await startEngine(DEV_UNIT_ID, user.uid);
+            } catch (e) {
+              console.warn('[dashboard] startEngine failed', e);
+            } finally {
+              // Lock out for ~10s — covers worst-case sequence: choke settle
+              // (0.5s) + spark settle (0.2s) + crank (≤4s) + post-catch (2s)
+              // + slack for the Pi to publish the final state.
+              setTimeout(() => setStartBusy(false), 10000);
             }
           },
         },
@@ -211,6 +242,11 @@ export function DashboardScreen() {
             label={acBusy ? 'Pressing…' : 'Aux'}
             onPress={onAcPress}
             disabled={acBusy || !user}
+          />
+          <SecondaryCTA
+            label={startBusy ? 'Starting…' : 'Start Engine'}
+            onPress={onStartPress}
+            disabled={startBusy || !user}
           />
           <SecondaryCTA
             label={crankBusy ? 'Cranking…' : 'Crank Engine'}

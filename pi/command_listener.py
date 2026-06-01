@@ -101,8 +101,10 @@ HANDLERS: Dict[str, Handler] = {
     "servo.update":      _lazy("servos",  "handle_servo_update",      "servo.update"),
     "lcd.wake":          _lazy("servos",  "handle_lcd_wake",          "lcd.wake"),
     "ac.toggle":         _lazy("servos",  "handle_ac_toggle",         "ac.toggle"),
-    # Phase G.2 — VESC starter cranking
+    # Phase G.2 — VESC starter cranking (low-level, no choke/spark management)
     "engine.crank":      _lazy("engine",  "handle_engine_crank",      "engine.crank"),
+    # Phase G.3 — full engine start choreography: choke → spark → crank → settle
+    "engine.start":      _lazy("engine",  "handle_engine_start",      "engine.start"),
     # Legacy / phase 1 — already-shipped outlet relays
     "outlet.toggle":     _not_implemented("outlet.toggle"),
     "theft.arm":         _not_implemented("theft.arm"),

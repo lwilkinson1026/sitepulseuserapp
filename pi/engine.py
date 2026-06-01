@@ -1,10 +1,22 @@
 """
-Engine start orchestrator (phase G.2).
+Engine start orchestrator (phase G.2 + G.3).
 
-The crank primitive: drive the VESC at a commanded motor current for up to
-maxDurationSec, refreshing the command at refreshHz to keep the VESC's
-command-timeout watchdog satisfied. Aborts when the engine catches OR when
-the duration ceiling is hit.
+Two public command handlers:
+
+  handle_engine_crank — low-level: crank only. No choke or spark management.
+                        Useful for bench testing.
+  handle_engine_start — full choreography: choke set → spark relay on →
+                        crank → (on catch) stabilize + open choke,
+                        (on failure) reset choke + spark off.
+
+Both share the same module-level lock — only one engine action runs at a time.
+
+The crank primitive
+-------------------
+Drive the VESC at a commanded motor current for up to maxDurationSec,
+refreshing the command at refreshHz to keep the VESC's command-timeout
+watchdog satisfied. Aborts when the engine catches OR when the duration
+ceiling is hit.
 
 Catch detection (no tach required)
 ----------------------------------
@@ -92,8 +104,21 @@ DEFAULT_CRANK_CONFIG: Dict[str, Any] = {
 VESC_IFACE   = os.environ.get("SITEPULSE_VESC_IFACE", "can0")
 VESC_UNIT_ID = int(os.environ.get("SITEPULSE_VESC_UNIT_ID", "0"))
 
-# Module-level mutex prevents two crank commands from racing on the same bus.
-_crank_lock = threading.Lock()
+# Module-level mutex: only one engine action (crank or start) runs at a time.
+_engine_lock = threading.Lock()
+
+
+# Defaults for the start macro. Mirror seed_config.py's `engine.start` block.
+DEFAULT_START_CONFIG: Dict[str, Any] = {
+    "chokePreset":             "start_cold",
+    "runChokePreset":          "run",         # after engine catches
+    "failChokePreset":         "idle",        # on crank failure
+    "sparkRelayChannel":       2,             # "Aux 2" per the deployed wiring
+    "chokeSettleMs":           500,           # pause between choke set and spark on
+    "sparkSettleMs":           200,           # pause between spark on and crank
+    "postCatchSettleMs":       2000,          # pause between catch and run-choke
+    "turnOffSparkOnFailure":   True,
+}
 
 
 # ─── config + state helpers ────────────────────────────────────────────────
@@ -107,6 +132,18 @@ def _load_crank_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
             cfg.update(block)
     except Exception as e:
         print(f"[engine] config/engine read failed, using defaults: {e}", flush=True)
+    return cfg
+
+
+def _load_start_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
+    cfg = dict(DEFAULT_START_CONFIG)
+    try:
+        snap = db.document(f"units/{unit_id}/config/engine").get()
+        if snap.exists:
+            block = (snap.to_dict() or {}).get("start", {})
+            cfg.update(block)
+    except Exception as e:
+        print(f"[engine] config/engine.start read failed, using defaults: {e}", flush=True)
     return cfg
 
 
@@ -244,86 +281,244 @@ def _run_crank_loop(
             last_low_current_at = None
 
 
-# ─── command handler ───────────────────────────────────────────────────────
+# ─── internal: pure crank, no lock, no state publishing ───────────────────
+
+def _resolve_crank_params(
+    cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Combine config + payload overrides, clamp to hard safety ceilings.
+    Centralized so engine.crank and engine.start can't drift."""
+    current_amps = float(payload.get("currentAmpsOverride", cfg.get("currentAmps", 65)))
+    max_dur      = float(payload.get("maxDurationSecOverride", cfg.get("maxDurationSec", 4)))
+    refresh_hz   = int(cfg.get("refreshHz", 10))
+    catch_ratio  = float(cfg.get("catchCurrentRatio", DEFAULT_CATCH_CURRENT_RATIO))
+    catch_hold_ms = int(cfg.get("catchHoldMs", 200))
+    arm_ratio    = float(cfg.get("armCurrentRatio", 0.5))
+
+    return {
+        "current_amps": max(0.0, min(MAX_CURRENT_AMPS_HARD, current_amps)),
+        "max_duration_sec": max(MIN_DURATION_SEC_HARD, min(MAX_DURATION_SEC_HARD, max_dur)),
+        "refresh_hz": max(MIN_REFRESH_HZ, min(MAX_REFRESH_HZ, refresh_hz)),
+        "catch_current_ratio": catch_ratio,
+        "catch_hold_ms": catch_hold_ms,
+        "arm_current_ratio": arm_ratio,
+    }
+
+
+def _do_crank(params: Dict[str, Any]) -> _CrankResult:
+    """Open the bus, run the crank loop, close the bus. Returns the result.
+
+    Caller responsibilities:
+      - Hold `_engine_lock`.
+      - Publish state transitions to current/engine.
+
+    This function is the shared primitive used by both `handle_engine_crank`
+    and the start-macro's `_do_start`.
+    """
+    sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
+    sender.open()
+    try:
+        bus = sender._bus  # noqa: SLF001 (intentional same-bus read+write)
+        return _run_crank_loop(
+            sender, bus,
+            current_amps=params["current_amps"],
+            max_duration_sec=params["max_duration_sec"],
+            refresh_hz=params["refresh_hz"],
+            catch_current_ratio=params["catch_current_ratio"],
+            catch_hold_ms=params["catch_hold_ms"],
+            arm_current_ratio=params["arm_current_ratio"],
+        )
+    finally:
+        # Even if the loop raised, send one final release before closing.
+        try:
+            sender.release()
+        except Exception:
+            pass
+        sender.close()
+
+
+# ─── public command handler: crank only ────────────────────────────────────
 
 def handle_engine_crank(
     db: firestore.Client,
     unit_id: str,
     payload: Dict[str, Any],
 ) -> None:
-    """Run one crank attempt.
+    """Run one crank attempt. No choke or spark management — caller is
+    responsible for those if they want a runnable engine.
 
     payload (all optional):
       currentAmpsOverride   — override config/engine.cranking.currentAmps
       maxDurationSecOverride — override config/engine.cranking.maxDurationSec
-
-    Both overrides are clamped to the hard safety ceilings.
     """
-    # Prevent two cranks from racing. Reject the second instead of queueing.
-    if not _crank_lock.acquire(blocking=False):
+    if not _engine_lock.acquire(blocking=False):
         raise RuntimeError("engine.crank: already in progress")
 
     try:
-        cfg = _load_crank_config(db, unit_id)
-
-        current_amps = float(
-            payload.get("currentAmpsOverride", cfg.get("currentAmps", 65))
-        )
-        max_dur = float(
-            payload.get("maxDurationSecOverride", cfg.get("maxDurationSec", 4))
-        )
-        refresh_hz = int(cfg.get("refreshHz", 10))
-        catch_ratio = float(cfg.get("catchCurrentRatio", DEFAULT_CATCH_CURRENT_RATIO))
-        catch_hold_ms = int(cfg.get("catchHoldMs", 200))
-        arm_ratio = float(cfg.get("armCurrentRatio", 0.5))
-
-        # Clamp to hard safety ceilings.
-        current_amps = max(0.0, min(MAX_CURRENT_AMPS_HARD, current_amps))
-        max_dur      = max(MIN_DURATION_SEC_HARD, min(MAX_DURATION_SEC_HARD, max_dur))
-        refresh_hz   = max(MIN_REFRESH_HZ, min(MAX_REFRESH_HZ, refresh_hz))
+        cfg    = _load_crank_config(db, unit_id)
+        params = _resolve_crank_params(cfg, payload)
 
         _publish_state(db, unit_id, "cranking", {
-            "startedAt": firestore.SERVER_TIMESTAMP,
-            "currentAmpsCommanded": current_amps,
-            "maxDurationSec": max_dur,
-            "refreshHz": refresh_hz,
+            "startedAt":            firestore.SERVER_TIMESTAMP,
+            "currentAmpsCommanded": params["current_amps"],
+            "maxDurationSec":       params["max_duration_sec"],
+            "refreshHz":            params["refresh_hz"],
+            "trigger":              "manual_crank",
         })
 
-        sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
-        sender.open()
-        # Reuse the sender's bus for reads too — socketcan is fine with
-        # mixed read/write on the same handle.
-        bus = sender._bus  # noqa: SLF001  (intentional same-bus access)
-
         try:
-            result = _run_crank_loop(
-                sender, bus,
-                current_amps=current_amps,
-                max_duration_sec=max_dur,
-                refresh_hz=refresh_hz,
-                catch_current_ratio=catch_ratio,
-                catch_hold_ms=catch_hold_ms,
-                arm_current_ratio=arm_ratio,
-            )
-        finally:
-            # Belt-and-suspenders: even if the loop raised, ensure one final
-            # release goes out before we close the bus.
-            try:
-                sender.release()
-            except Exception:
-                pass
-            sender.close()
+            result = _do_crank(params)
+        except Exception as e:
+            _publish_state(db, unit_id, "failed_error", {"error": str(e)})
+            print(f"[engine] crank failed with exception: {e!r}", flush=True)
+            raise
 
         _publish_state(db, unit_id, result.state, result.metadata)
         print(
-            f"[engine] crank done: state={result.state!r} "
-            f"meta={result.metadata}",
+            f"[engine] crank done: state={result.state!r} meta={result.metadata}",
             flush=True,
         )
-
-    except Exception as e:
-        _publish_state(db, unit_id, "failed_error", {"error": str(e)})
-        print(f"[engine] crank failed with exception: {e!r}", flush=True)
-        raise
     finally:
-        _crank_lock.release()
+        _engine_lock.release()
+
+
+# ─── public command handler: full start choreography ──────────────────────
+
+def _set_choke_safely(db: firestore.Client, unit_id: str, preset: str) -> None:
+    """Set the choke via the servo preset handler. Imported lazily so this
+    module stays importable on a Mac (no hardware deps)."""
+    from servos import handle_servo_preset
+    handle_servo_preset(db, unit_id, {"name": preset})
+
+
+def _set_spark_safely(
+    db: firestore.Client, unit_id: str, channel: int, mode: str,
+) -> None:
+    """Drive the spark relay via the existing relay handler. Lazy import for
+    the same reason as the servo helper."""
+    from relays import handle_relay_set
+    handle_relay_set(db, unit_id, {"channel": channel, "mode": mode})
+
+
+def handle_engine_start(
+    db: firestore.Client,
+    unit_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Full engine start choreography: choke → spark → crank → (on catch)
+    open choke, (on failure) reset choke + spark off.
+
+    payload (all optional):
+      chokePreset            — override start.chokePreset for this attempt
+      currentAmpsOverride    — passed through to the crank step
+      maxDurationSecOverride — passed through to the crank step
+    """
+    if not _engine_lock.acquire(blocking=False):
+        raise RuntimeError("engine.start: already in progress")
+
+    try:
+        start_cfg     = _load_start_config(db, unit_id)
+        crank_cfg     = _load_crank_config(db, unit_id)
+        crank_params  = _resolve_crank_params(crank_cfg, payload)
+
+        choke_preset      = payload.get("chokePreset", start_cfg["chokePreset"])
+        run_choke_preset  = start_cfg["runChokePreset"]
+        fail_choke_preset = start_cfg["failChokePreset"]
+        spark_channel     = int(start_cfg["sparkRelayChannel"])
+        choke_settle_s    = max(0.0, float(start_cfg["chokeSettleMs"])) / 1000.0
+        spark_settle_s    = max(0.0, float(start_cfg["sparkSettleMs"])) / 1000.0
+        post_catch_s      = max(0.0, float(start_cfg["postCatchSettleMs"])) / 1000.0
+        turn_off_spark    = bool(start_cfg["turnOffSparkOnFailure"])
+
+        sequence_started_at = time.monotonic()
+
+        # 1. Choke to cranking position
+        _publish_state(db, unit_id, "starting", {
+            "startedAt":            firestore.SERVER_TIMESTAMP,
+            "phase":                "choke_setting",
+            "chokePreset":          choke_preset,
+            "currentAmpsCommanded": crank_params["current_amps"],
+        })
+        _set_choke_safely(db, unit_id, choke_preset)
+        time.sleep(choke_settle_s)
+
+        # 2. Spark relay on
+        _publish_state(db, unit_id, "starting", {"phase": "spark_on"})
+        _set_spark_safely(db, unit_id, spark_channel, "on")
+        time.sleep(spark_settle_s)
+
+        # 3. Crank
+        _publish_state(db, unit_id, "cranking", {
+            "currentAmpsCommanded": crank_params["current_amps"],
+            "maxDurationSec":       crank_params["max_duration_sec"],
+            "refreshHz":            crank_params["refresh_hz"],
+            "trigger":              "engine_start",
+        })
+
+        try:
+            result = _do_crank(crank_params)
+        except Exception as e:
+            # Crank raised — best-effort cleanup before bubbling up.
+            print(f"[engine.start] crank raised: {e!r}; resetting choke + spark", flush=True)
+            try:
+                _set_choke_safely(db, unit_id, fail_choke_preset)
+            except Exception as ce:
+                print(f"[engine.start] choke reset failed: {ce!r}", flush=True)
+            if turn_off_spark:
+                try:
+                    _set_spark_safely(db, unit_id, spark_channel, "off")
+                except Exception as se:
+                    print(f"[engine.start] spark off failed: {se!r}", flush=True)
+            _publish_state(db, unit_id, "failed_error", {
+                "error": str(e), "phase": "cranking",
+            })
+            raise
+
+        # 4. Post-crank
+        sequence_total_s = round(time.monotonic() - sequence_started_at, 3)
+
+        if result.state == "running":
+            # Engine caught. Stabilize, then open the choke.
+            _publish_state(db, unit_id, "running", {
+                **result.metadata,
+                "phase":           "stabilizing",
+                "sequenceTotalSec": sequence_total_s,
+            })
+            time.sleep(post_catch_s)
+            try:
+                _set_choke_safely(db, unit_id, run_choke_preset)
+            except Exception as e:
+                print(f"[engine.start] run-choke set failed: {e!r}", flush=True)
+            _publish_state(db, unit_id, "running", {
+                **result.metadata,
+                "phase":           "complete",
+                "sequenceTotalSec": round(time.monotonic() - sequence_started_at, 3),
+            })
+            print(
+                f"[engine.start] success: caught after {result.metadata.get('durationSec', '?')}s "
+                f"(total seq {sequence_total_s}s)",
+                flush=True,
+            )
+        else:
+            # Crank failed (timeout / no load). Reset choke + spark, propagate state.
+            try:
+                _set_choke_safely(db, unit_id, fail_choke_preset)
+            except Exception as e:
+                print(f"[engine.start] choke reset failed: {e!r}", flush=True)
+            if turn_off_spark:
+                try:
+                    _set_spark_safely(db, unit_id, spark_channel, "off")
+                except Exception as e:
+                    print(f"[engine.start] spark off failed: {e!r}", flush=True)
+            _publish_state(db, unit_id, result.state, {
+                **result.metadata,
+                "sequenceTotalSec": sequence_total_s,
+            })
+            print(
+                f"[engine.start] failed: state={result.state!r} meta={result.metadata}",
+                flush=True,
+            )
+
+    finally:
+        _engine_lock.release()

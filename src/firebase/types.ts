@@ -113,7 +113,9 @@ export type CommandKind =
   // Predator AC outlet toggle-button presser (phase E.3)
   | 'ac.toggle'
   // VESC starter cranking (phase G.2)
-  | 'engine.crank';
+  | 'engine.crank'
+  // Full engine start choreography (phase G.3): choke → spark → crank → settle
+  | 'engine.start';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';
 

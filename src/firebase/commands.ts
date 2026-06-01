@@ -135,3 +135,25 @@ export function crankEngine(
   if (override?.maxDurationSec !== undefined) payload.maxDurationSecOverride = override.maxDurationSec;
   return issueCommand(unitId, uid, 'engine.crank', payload);
 }
+
+// ── engine full-start choreography (phase G.3) ──────────────────────────
+// Runs the full sequence: set choke → spark relay on → crank → on-catch
+// stabilize + open choke. On failure (timeout / no load), the choke is
+// returned to idle and the spark relay is turned back off automatically.
+// This is the user-facing "Start Engine" action; engine.crank stays
+// available as a low-level primitive for bench testing.
+export function startEngine(
+  unitId: string,
+  uid: string,
+  override?: {
+    chokePreset?: 'start_cold' | 'start_warm' | string;
+    currentAmps?: number;
+    maxDurationSec?: number;
+  },
+) {
+  const payload: Record<string, unknown> = {};
+  if (override?.chokePreset !== undefined) payload.chokePreset = override.chokePreset;
+  if (override?.currentAmps !== undefined) payload.currentAmpsOverride = override.currentAmps;
+  if (override?.maxDurationSec !== undefined) payload.maxDurationSecOverride = override.maxDurationSec;
+  return issueCommand(unitId, uid, 'engine.start', payload);
+}
