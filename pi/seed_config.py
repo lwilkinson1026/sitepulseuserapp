@@ -100,6 +100,30 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "intervalSec": 600,
         "pressDurationSec": 0.15,
     },
+    "engine": {
+        # VESC starter-cranking parameters. The engine.crank command reads
+        # this; payload overrides at command time. All values are clamped
+        # to hard safety ceilings in pi/engine.py regardless of config.
+        "cranking": {
+            # Absolute motor current commanded during cranking. VESC will
+            # clamp to its own motor-current limit, so confirm VESC Tool's
+            # configured max motor current is ≥ this value.
+            "currentAmps": 65.0,
+            # Per-attempt ceiling. Code clamps to 8s hard max.
+            "maxDurationSec": 4.0,
+            # Refresh rate for the SET_CURRENT command. VESC's command
+            # timeout (default ~1s) requires we send faster than that.
+            "refreshHz": 10,
+            # Catch detection: engine considered caught when |motor_amps|
+            # stays below currentAmps × this ratio for catchHoldMs.
+            "catchCurrentRatio": 0.25,
+            "catchHoldMs": 200,
+            # Arming: catch detection only activates after the motor has
+            # actually pulled ≥ currentAmps × this. Filters dry-runs
+            # (no motor connected → no current draw → no false catch).
+            "armCurrentRatio": 0.5,
+        },
+    },
     "charge": {
         "enabled": False,
         "preset": "daytime_only",

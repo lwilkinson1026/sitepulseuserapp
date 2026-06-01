@@ -1,11 +1,13 @@
 [Unit]
-Description=SitePulse Firebase publisher (Predator I²C → Firestore)
-After=network-online.target
-Wants=network-online.target
-# Publisher sniffs the Predator's BMS↔LCD I²C bus on GPIO 22/23 (a dedicated
-# bit-banged pair, intentionally NOT GPIO 2/3 — those are reserved for the
-# PCA9685 servo driver on the kernel's i2c-1 bus).  No CAN dependency anymore
-# — the VESC sitepulse-can.service is no longer required.
+Description=SitePulse Firebase publisher (Predator I²C + VESC CAN → Firestore)
+After=network-online.target sitepulse-can.service
+Wants=network-online.target sitepulse-can.service
+# Publisher sniffs the Predator's BMS↔LCD I²C bus on GPIO 22/23 AND listens
+# to the VESC motor controller on can0. Wants= (not Requires=) the CAN
+# service so the publisher still boots if can0 is misconfigured — the VESC
+# listener logs a warning and the Predator pipeline runs normally.
+# I²C is bit-banged on GPIO 22/23, intentionally NOT the kernel's i2c-1 bus
+# on GPIO 2/3 (reserved for the PCA9685 servo driver).
 
 [Service]
 Type=simple

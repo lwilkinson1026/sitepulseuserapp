@@ -118,3 +118,20 @@ export function toggleAc(unitId: string, uid: string, pressDurationSec?: number)
   if (pressDurationSec !== undefined) payload.pressDurationSec = pressDurationSec;
   return issueCommand(unitId, uid, 'ac.toggle', payload);
 }
+
+// ── engine starter cranking (phase G.2) ─────────────────────────────────
+// Single crank attempt via the VESC motor controller. Pi-side `engine.py`
+// runs a safety loop that refreshes SET_CURRENT at 10 Hz, watches motor
+// current for the engine-catch signal, and aborts on catch OR timeout.
+// `currentAmps` and `maxDurationSec` override the config-level defaults
+// for this one attempt; both are clamped to hard safety ceilings on the Pi.
+export function crankEngine(
+  unitId: string,
+  uid: string,
+  override?: { currentAmps?: number; maxDurationSec?: number },
+) {
+  const payload: Record<string, unknown> = {};
+  if (override?.currentAmps !== undefined) payload.currentAmpsOverride = override.currentAmps;
+  if (override?.maxDurationSec !== undefined) payload.maxDurationSecOverride = override.maxDurationSec;
+  return issueCommand(unitId, uid, 'engine.crank', payload);
+}

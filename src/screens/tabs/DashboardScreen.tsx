@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useAuth } from '../../hooks/AuthContext';
-import { toggleAc, wakeLcd } from '../../firebase/commands';
+import { crankEngine, toggleAc, wakeLcd } from '../../firebase/commands';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -63,6 +63,38 @@ export function DashboardScreen() {
     } finally {
       setTimeout(() => setAcBusy(false), 1200);
     }
+  };
+
+  // Cranking is dangerous enough to deserve a confirm. Disabled state
+  // covers the whole engine.crank lifetime (up to maxDurationSec ≈ 4s);
+  // we leave the button locked for 6s after firing so a double-tap can't
+  // race a still-in-flight attempt on the Pi.
+  const [crankBusy, setCrankBusy] = useState(false);
+
+  const onCrankPress = () => {
+    if (!user || crankBusy) return;
+    Alert.alert(
+      'Crank Engine?',
+      'This will spin the starter motor at the configured current for up to ~4 seconds. ' +
+        'Make sure the spark relay is on and the choke is set before continuing.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Crank',
+          style: 'destructive',
+          onPress: async () => {
+            setCrankBusy(true);
+            try {
+              await crankEngine(DEV_UNIT_ID, user.uid);
+            } catch (e) {
+              console.warn('[dashboard] crankEngine failed', e);
+            } finally {
+              setTimeout(() => setCrankBusy(false), 6000);
+            }
+          },
+        },
+      ],
+    );
   };
 
   if (loading) {
@@ -179,6 +211,11 @@ export function DashboardScreen() {
             label={acBusy ? 'Pressing…' : 'Aux'}
             onPress={onAcPress}
             disabled={acBusy || !user}
+          />
+          <SecondaryCTA
+            label={crankBusy ? 'Cranking…' : 'Crank Engine'}
+            onPress={onCrankPress}
+            disabled={crankBusy || !user}
           />
         </View>
 

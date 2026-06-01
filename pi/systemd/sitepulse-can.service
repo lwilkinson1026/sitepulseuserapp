@@ -1,0 +1,17 @@
+[Unit]
+Description=SitePulse CAN bus (can0 @ 500 kbps for VESC motor controller)
+After=network.target
+# can0 is provided by the Waveshare RS485-CAN HAT (MCP2515 + SPI). The kernel
+# driver creates the netdev at boot; this unit just brings the link up at the
+# VESC's bitrate so listeners and senders can attach. Restart-safe because
+# we down the interface first, swallowing failure on a cold boot.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/ip link set can0 down
+ExecStart=/usr/sbin/ip link set can0 up type can bitrate 500000
+ExecStop=/usr/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target

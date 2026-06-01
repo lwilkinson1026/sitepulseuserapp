@@ -63,6 +63,24 @@ export interface TelemetrySnapshot {
   lcd_frame_rate_hz?: number;      // observed I²C frame rate
   raw_frame_hex?: string;          // 18-byte hex dump, for ongoing decoder dev
 
+  // VESC motor controller telemetry (phase G.1). All optional because the
+  // Pi may publish before the CAN bus comes up, or with no controller wired.
+  // `motor_stale` is the freshness indicator — true means no recent frame.
+  motor_stale?: boolean;
+  motor_age_sec?: number;          // seconds since last frame, 0 = just now
+  motor_rpm?: number;              // signed; positive = drive, negative = reverse/regen
+  motor_amps?: number;             // total motor current (A)
+  motor_amps_in?: number;          // total DC input current to controller (A)
+  motor_duty?: number;             // -1.0 to 1.0
+  motor_volts?: number;            // input voltage at the controller
+  motor_temp_c?: number;           // motor winding temp (probe must be wired)
+  motor_fet_temp_c?: number;       // MOSFET / driver temp
+  motor_tachometer?: number;       // cumulative count (units per VESC config)
+  motor_ah?: number;               // cumulative amp-hours consumed
+  motor_ah_charged?: number;       // cumulative amp-hours regenerated (charge output)
+  motor_wh?: number;               // cumulative watt-hours consumed
+  motor_wh_charged?: number;       // cumulative watt-hours regenerated
+
   // System
   system_mode: SystemMode;
   last_update: Timestamp;          // server timestamp set by the Pi
@@ -93,7 +111,9 @@ export type CommandKind =
   // Predator LCD wake-button presser (phase E.2)
   | 'lcd.wake'
   // Predator AC outlet toggle-button presser (phase E.3)
-  | 'ac.toggle';
+  | 'ac.toggle'
+  // VESC starter cranking (phase G.2)
+  | 'engine.crank';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';
 

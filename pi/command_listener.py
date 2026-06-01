@@ -101,6 +101,8 @@ HANDLERS: Dict[str, Handler] = {
     "servo.update":      _lazy("servos",  "handle_servo_update",      "servo.update"),
     "lcd.wake":          _lazy("servos",  "handle_lcd_wake",          "lcd.wake"),
     "ac.toggle":         _lazy("servos",  "handle_ac_toggle",         "ac.toggle"),
+    # Phase G.2 — VESC starter cranking
+    "engine.crank":      _lazy("engine",  "handle_engine_crank",      "engine.crank"),
     # Legacy / phase 1 — already-shipped outlet relays
     "outlet.toggle":     _not_implemented("outlet.toggle"),
     "theft.arm":         _not_implemented("theft.arm"),
@@ -232,6 +234,9 @@ def _start_background_services(db: firestore.Client) -> None:
         ("servos.start_lcd_wake_loop", lambda: __import__(
             "servos", fromlist=["start_lcd_wake_loop"]
         ).start_lcd_wake_loop(db, UNIT_ID)),
+        ("engine.init_engine", lambda: __import__(
+            "engine", fromlist=["init_engine"]
+        ).init_engine(db, UNIT_ID)),
     ]
     for name, starter in services:
         try:

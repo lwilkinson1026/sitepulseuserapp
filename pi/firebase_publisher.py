@@ -47,6 +47,7 @@ from firebase_admin import credentials, firestore
 
 from predator_decoder import FrameAssembler, decode_frame
 from predator_i2c_sniffer import PassiveI2cSniffer
+from vesc_listener import VescListener
 
 
 UNIT_ID            = os.environ.get("SITEPULSE_UNIT_ID", "UNIT-001")
@@ -57,6 +58,9 @@ PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "3"))
 WATCH_ADDRESS      = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 PUBLISH_RAW        = os.environ.get("SITEPULSE_PREDATOR_PUBLISH_RAW") == "1"
 DEBUG              = os.environ.get("SITEPULSE_DEBUG") == "1"
+# VESC integration is opt-out so the publisher still runs cleanly on a
+# bench Pi without the CAN HAT seated. Set to "0" to disable.
+VESC_ENABLED       = os.environ.get("SITEPULSE_VESC_ENABLED", "1") != "0"
 
 
 # Diagnostic counters reset every publish cycle.
@@ -74,6 +78,10 @@ class _Stats:
 
 
 stats = _Stats()
+
+# Module-level so build_snapshot() can read it without main() passing it in.
+# Set in main() right after the listener starts.
+_vesc: Optional[VescListener] = None
 
 
 def build_snapshot() -> Optional[dict]:
@@ -107,6 +115,14 @@ def build_snapshot() -> Optional[dict]:
 
     if PUBLISH_RAW:
         snap["raw_frame_hex"] = " ".join(f"{b:02X}" for b in stats.last_raw_frame)
+
+    # Merge in the latest VESC motor-controller telemetry. The listener
+    # maintains its own thread-safe latest-value cache; we just pull a
+    # snapshot at publish cadence. Predator and VESC never overlap on
+    # keys — Predator owns battery_soc + AC/DC state, VESC owns motor_*.
+    if _vesc is not None:
+        for k, v in _vesc.snapshot().items():
+            snap[k] = v
 
     # Stash warnings so main() can log them.
     stats.last_warnings = list(decoded["warnings"])
@@ -146,12 +162,21 @@ def _log_warnings_once(warnings: list[str]) -> None:
 
 
 def main() -> None:
+    global _vesc
+
     db = init_firestore()
     print(
         f"[sitepulse] Predator I²C sniffer starting "
         f"(addr=0x{WATCH_ADDRESS:02X}, publishing {UNIT_ID} every {PUBLISH_INTERVAL_S}s)",
         flush=True,
     )
+
+    if VESC_ENABLED:
+        _vesc = VescListener()
+        _vesc.start()
+        # Don't block on it — if the CAN bus is down or python-can is missing
+        # the listener prints a one-line warning and exits its thread; the
+        # publisher continues with Predator data only.
 
     assembler = FrameAssembler()
     last_published = 0.0
@@ -189,13 +214,21 @@ def main() -> None:
                 last_published = now
                 _log_warnings_once(stats.last_warnings)
                 stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                motor_summary = ""
+                if _vesc is not None and not snap.get("motor_stale", True):
+                    motor_summary = (
+                        f"  rpm={snap.get('motor_rpm', '?')}  "
+                        f"V={snap.get('motor_volts', '?')}  "
+                        f"A={snap.get('motor_amps', '?')}"
+                    )
                 print(
                     f"[{stamp}] {UNIT_ID}  "
                     f"soc={snap['battery_soc']}%  "
                     f"mode={snap['output_mode']}  "
                     f"watts={snap['output_watts']}  "
                     f"ttempty={snap['time_to_empty_minutes']}m  "
-                    f"frames={stats.frames_decoded}  rate={snap['lcd_frame_rate_hz']}Hz",
+                    f"frames={stats.frames_decoded}  rate={snap['lcd_frame_rate_hz']}Hz"
+                    f"{motor_summary}",
                     flush=True,
                 )
                 stats.reset()
