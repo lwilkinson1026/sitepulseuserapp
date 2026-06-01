@@ -89,7 +89,9 @@ export type CommandKind =
   // engine recharge schedule (phase C)
   | 'engine.override'
   | 'charge.update'
-  | 'schedule.update';
+  | 'schedule.update'
+  // Predator LCD wake-button presser (phase E.2)
+  | 'lcd.wake';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';
 

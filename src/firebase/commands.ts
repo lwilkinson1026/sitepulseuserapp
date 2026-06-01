@@ -96,3 +96,14 @@ export function startCameraStream(unitId: string, uid: string) {
 export function stopCameraStream(unitId: string, uid: string) {
   return issueCommand(unitId, uid, 'camera.stopStream', {});
 }
+
+// ── LCD wake button (phase E.2) ─────────────────────────────────────────
+// Triggers a single press-and-release of the Predator's LCD wake button
+// via the PCA9685 ch2 servo. `pressDurationSec` overrides the default
+// (config/lcdWake.pressDurationSec) for this one press only — leave it
+// undefined to use the configured default.
+export function wakeLcd(unitId: string, uid: string, pressDurationSec?: number) {
+  const payload: Record<string, unknown> = {};
+  if (pressDurationSec !== undefined) payload.pressDurationSec = pressDurationSec;
+  return issueCommand(unitId, uid, 'lcd.wake', payload);
+}
