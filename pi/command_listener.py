@@ -242,6 +242,12 @@ def _start_background_services(db: firestore.Client) -> None:
         ("engine.init_engine", lambda: __import__(
             "engine", fromlist=["init_engine"]
         ).init_engine(db, UNIT_ID)),
+        # Phase G.5 — autonomous supervisor. Spawns a polling thread that
+        # only takes action when config/engine.supervisor.enabled is true,
+        # so this is safe to start unconditionally.
+        ("engine_supervisor.start_supervisor", lambda: __import__(
+            "engine_supervisor", fromlist=["start_supervisor"]
+        ).start_supervisor(db, UNIT_ID)),
     ]
     for name, starter in services:
         try:

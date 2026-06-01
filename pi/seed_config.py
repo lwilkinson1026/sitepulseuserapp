@@ -187,6 +187,21 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # motor after signaling abort.
             "chargeJoinTimeoutSec": 5,
         },
+        # Autonomous supervisor (engine_supervisor.py). Polls voltage and
+        # orchestrates the start → charge → stop cycle hands-off. Disabled
+        # by default; flip enabled=true to activate.
+        "supervisor": {
+            "enabled":              False,
+            # 14S LiFePO4: ~46.5 V ≈ 20 % SOC, ~45.5 V ≈ 10 % SOC.
+            # Tune empirically by correlating VESC voltage to the LCD's
+            # SOC reading. Stop threshold lives in engine.charge.voltageStop.
+            "voltageStart":         46.5,   # below → auto-start in active window
+            "voltageCritical":      45.5,   # below → start even in quiet hours
+                                            # (if allowQuietOverride is true)
+            "tickIntervalSec":      15,
+            "actionCooldownSec":    60,
+            "respectQuietHours":    True,
+        },
     },
     "charge": {
         "enabled": False,

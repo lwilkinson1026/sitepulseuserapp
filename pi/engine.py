@@ -729,12 +729,16 @@ def _run_charge_loop(
                 continue
 
             if last_volts is not None and last_volts >= voltage_stop:
-                result_state    = "idle"
+                # Engine is still running with spark on — we just released
+                # the motor. Caller (or supervisor) is responsible for
+                # firing engine.stop to actually shut the engine down.
+                result_state    = "running"
                 result_metadata = {
                     "reason":       "voltage_stop_reached",
                     "durationSec":  round(elapsed, 1),
                     "peakVoltage":  round(peak_volts, 2),
                     "finalVoltage": round(last_volts, 2),
+                    "phase":        "charge_complete",
                 }
                 break
             if last_volts is not None and last_volts <= voltage_min:
@@ -772,20 +776,23 @@ def _run_charge_loop(
                 }
                 break
 
-        if _charge_abort.is_set() and result_state is None:
-            result_state    = "stopped"
-            result_metadata = {
-                "reason":      "abort_signaled",
-                "durationSec": round(time.monotonic() - started_at, 1),
-                "peakVoltage": round(peak_volts, 2),
-            }
-
         try:
             sender.release()
         except Exception:
             pass
 
-        _publish_state(db, unit_id, result_state or "idle", result_metadata)
+        # Abort signaled (engine.stop) — let stop's own state publishes
+        # take over. The motor is released; engine.stop will publish
+        # "stopping" → "idle" as it walks through its sequence.
+        if _charge_abort.is_set() and result_state is None:
+            print(
+                f"[engine] charge aborted after {round(time.monotonic() - started_at, 1)}s "
+                f"(peak {round(peak_volts, 2)} V) — engine.stop owns state from here",
+                flush=True,
+            )
+            return  # explicitly skip the publish-state below
+
+        _publish_state(db, unit_id, result_state or "running", result_metadata)
         print(
             f"[engine] charge done: state={result_state!r} meta={result_metadata}",
             flush=True,
