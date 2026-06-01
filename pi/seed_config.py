@@ -63,7 +63,7 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         # cloudflareInputId left unset until the user provisions a live input
     },
     "servos": {
-        # Two servos:
+        # Three servos:
         #   choke  — PCA9685 ch1, engine choke linkage (calibrate end-stops
         #            against the real linkage; pre-linkage bench seed is
         #            1333-1667 us = 60-120 deg in the 1000-2000 us mapping).
@@ -71,9 +71,14 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #            LCD wake button to defeat its 10-min sleep timer.
         #            1000-2000 us is a safe-but-loose default; calibrate
         #            with `python3 servo_test.py 2` before mounting the arm.
+        #   ac     — PCA9685 ch3, micro servo arm that taps the Predator
+        #            AC power toggle button. Each press flips AC state.
+        #            Calibrate with `python3 servo_test.py 3`.
         "choke":  {"channel": 1, "minUs": 1333, "maxUs": 1667, "slewRate": 2.0,
                    "defaultOnStart": 0.0},
         "button": {"channel": 2, "minUs": 1000, "maxUs": 2000, "slewRate": 10.0,
+                   "defaultOnStart": 0.0},
+        "ac":     {"channel": 3, "minUs": 1000, "maxUs": 2000, "slewRate": 10.0,
                    "defaultOnStart": 0.0},
         "presets": {
             "idle":       {"choke": 0.0},
@@ -82,6 +87,8 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             "run":        {"choke": 0.0},
             "press":      {"button": 1.0},
             "release":    {"button": 0.0},
+            "ac_press":   {"ac": 1.0},
+            "ac_release": {"ac": 0.0},
         },
     },
     "lcdWake": {

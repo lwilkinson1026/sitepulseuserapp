@@ -1,13 +1,17 @@
 """
 PCA9685 (V1246) servo controller.
 
-Two servos:
+Three servos:
   - "choke"  on PCA9685 ch1 — engine choke linkage. 0.0 = open/run,
              1.0 = closed/cold-start. If the linkage flips polarity,
              swap minUs/maxUs in config rather than negating positions.
   - "button" on PCA9685 ch2 — micro servo with an arm that pushes the
              Predator LCD's wake button so the screen doesn't sleep
              during active monitoring. 0.0 = released, 1.0 = pressed.
+  - "ac"     on PCA9685 ch3 — micro servo arm that taps the Predator's
+             AC power toggle button. Each press flips the AC outlet
+             state (on→off or off→on); the servo can't tell which.
+             0.0 = released, 1.0 = pressed.
 
 Positions are normalized 0.0-1.0. Per-servo pulse-width range
 (minUs/maxUs) maps the normalized value to actual PWM via the
@@ -18,6 +22,7 @@ Exposed handlers (imported lazily by command_listener.py):
     handle_servo_preset(db, unit_id, payload)
     handle_servo_update(db, unit_id, payload)
     handle_lcd_wake(db, unit_id, payload)
+    handle_ac_toggle(db, unit_id, payload)
 
 Lifecycle:
     start_servos(db, unit_id)          — boot: drive defaults, start slew loop.
@@ -35,7 +40,7 @@ from typing import Any, Dict, Optional, Tuple
 from firebase_admin import firestore
 
 
-SERVO_NAMES = ("choke", "button")
+SERVO_NAMES = ("choke", "button", "ac")
 PWM_FREQ_HZ = 50          # standard hobby servo
 TICK_HZ = 50              # slew loop tick rate
 MIRROR_PERIOD_S = 1.0     # heartbeat for current/servos
@@ -93,6 +98,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # not a sweep). Default position 0.0 = released.
     "button": {"channel": 2, "minUs": 1000, "maxUs": 2000, "slewRate": 10.0,
                "defaultOnStart": 0.0},
+    # AC-toggle button presser. Same shape as "button" — calibrate with
+    # `servo_test.py 3` before mounting. Note: this servo toggles AC power
+    # to whatever's plugged into the Predator's outlets; each press flips
+    # the state. The Pi has no way to know which state we're in.
+    "ac":     {"channel": 3, "minUs": 1000, "maxUs": 2000, "slewRate": 10.0,
+               "defaultOnStart": 0.0},
     "presets": {
         "idle":       {"choke": 0.0},
         "start_cold": {"choke": 1.0},
@@ -100,6 +111,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "run":        {"choke": 0.0},
         "press":      {"button": 1.0},
         "release":    {"button": 0.0},
+        "ac_press":   {"ac": 1.0},
+        "ac_release": {"ac": 0.0},
     },
 }
 
@@ -243,7 +256,8 @@ def start_servos(db: firestore.Client, unit_id: str) -> None:
     _mirror(db, unit_id)
     print(
         f"[servos] started; choke ch{_channels['choke']}, "
-        f"button ch{_channels['button']}",
+        f"button ch{_channels['button']}, "
+        f"ac ch{_channels['ac']}",
         flush=True,
     )
 
@@ -439,3 +453,54 @@ def start_lcd_wake_loop(db: firestore.Client, unit_id: str) -> None:
     )
     _lcd_wake_thread.start()
     print("[servos] lcd-wake loop started (config/lcdWake.enabled gates presses)", flush=True)
+
+
+# ─── AC toggle button presser ──────────────────────────────────────────────
+# Same press-and-release pattern as wake_lcd but no periodic loop — AC is
+# only toggled on explicit user command. Each press flips the Predator's
+# AC output state; the Pi has no read-back of which state it's in.
+
+AC_TOGGLE_DEFAULT_PRESS_S = 0.5   # longer than LCD-wake — AC power button
+                                  # needs a deliberate hold to register a
+                                  # toggle, not a quick tap. Override via payload.
+
+
+def press_ac(
+    db: firestore.Client,
+    unit_id: str,
+    press_duration_s: Optional[float] = None,
+) -> None:
+    """Press and release the AC toggle button once.
+
+    Each call flips the Predator's AC output state (on→off or off→on);
+    no state tracking on this side. Initializes the servo lazily so a
+    manual press works even if `start_servos` somehow didn't.
+
+    `press_duration_s` is clamped to [0.05, 2.0]; None uses
+    AC_TOGGLE_DEFAULT_PRESS_S.
+    """
+    global _last_command_at
+    cfg = _load_config(db, unit_id)
+    _ensure_initialized(cfg)
+    _ensure_slew_running(db, unit_id)
+
+    if press_duration_s is None:
+        press_duration_s = AC_TOGGLE_DEFAULT_PRESS_S
+    press_duration_s = max(0.05, min(2.0, float(press_duration_s)))
+
+    with _lock:
+        _target["ac"] = 1.0
+        _last_command_at = time.monotonic()
+    time.sleep(press_duration_s)
+    with _lock:
+        _target["ac"] = 0.0
+        _last_command_at = time.monotonic()
+    _mirror(db, unit_id)
+
+
+def handle_ac_toggle(
+    db: firestore.Client, unit_id: str, payload: Dict[str, Any]
+) -> None:
+    """payload = {} or {pressDurationSec: 0.25}"""
+    dur = payload.get("pressDurationSec")
+    press_ac(db, unit_id, float(dur) if dur is not None else None)

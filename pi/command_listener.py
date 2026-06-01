@@ -100,6 +100,7 @@ HANDLERS: Dict[str, Handler] = {
     "servo.preset":      _lazy("servos",  "handle_servo_preset",      "servo.preset"),
     "servo.update":      _lazy("servos",  "handle_servo_update",      "servo.update"),
     "lcd.wake":          _lazy("servos",  "handle_lcd_wake",          "lcd.wake"),
+    "ac.toggle":         _lazy("servos",  "handle_ac_toggle",         "ac.toggle"),
     # Legacy / phase 1 — already-shipped outlet relays
     "outlet.toggle":     _not_implemented("outlet.toggle"),
     "theft.arm":         _not_implemented("theft.arm"),

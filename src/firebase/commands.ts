@@ -107,3 +107,14 @@ export function wakeLcd(unitId: string, uid: string, pressDurationSec?: number) 
   if (pressDurationSec !== undefined) payload.pressDurationSec = pressDurationSec;
   return issueCommand(unitId, uid, 'lcd.wake', payload);
 }
+
+// ── AC outlet toggle (phase E.3) ────────────────────────────────────────
+// Triggers a single press-and-release of the Predator's AC power button
+// via the PCA9685 ch3 servo. Each press *flips* the AC outlet state
+// (on→off or off→on); the Pi has no way to know which direction it went.
+// Callers should be ready for either outcome.
+export function toggleAc(unitId: string, uid: string, pressDurationSec?: number) {
+  const payload: Record<string, unknown> = {};
+  if (pressDurationSec !== undefined) payload.pressDurationSec = pressDurationSec;
+  return issueCommand(unitId, uid, 'ac.toggle', payload);
+}

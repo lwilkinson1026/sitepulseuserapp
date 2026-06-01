@@ -91,7 +91,9 @@ export type CommandKind =
   | 'charge.update'
   | 'schedule.update'
   // Predator LCD wake-button presser (phase E.2)
-  | 'lcd.wake';
+  | 'lcd.wake'
+  // Predator AC outlet toggle-button presser (phase E.3)
+  | 'ac.toggle';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';
 

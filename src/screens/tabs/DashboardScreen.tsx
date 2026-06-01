@@ -3,7 +3,7 @@ import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-nat
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useAuth } from '../../hooks/AuthContext';
-import { wakeLcd } from '../../firebase/commands';
+import { toggleAc, wakeLcd } from '../../firebase/commands';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -34,6 +34,7 @@ export function DashboardScreen() {
   // round-trip the ack into here yet — just debounce by time to prevent
   // double-taps from queueing two presses back-to-back.
   const [wakeBusy, setWakeBusy] = useState(false);
+  const [acBusy, setAcBusy] = useState(false);
 
   const onWakePress = async () => {
     if (!user || wakeBusy) return;
@@ -49,6 +50,18 @@ export function DashboardScreen() {
       // physically complete its press-release cycle before the user can
       // queue another.
       setTimeout(() => setWakeBusy(false), 1200);
+    }
+  };
+
+  const onAcPress = async () => {
+    if (!user || acBusy) return;
+    setAcBusy(true);
+    try {
+      await toggleAc(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      console.warn('[dashboard] toggleAc failed', e);
+    } finally {
+      setTimeout(() => setAcBusy(false), 1200);
     }
   };
 
@@ -161,6 +174,11 @@ export function DashboardScreen() {
             label={wakeBusy ? 'Waking…' : 'Wake LCD'}
             onPress={onWakePress}
             disabled={wakeBusy || !user}
+          />
+          <SecondaryCTA
+            label={acBusy ? 'Pressing…' : 'Aux'}
+            onPress={onAcPress}
+            disabled={acBusy || !user}
           />
         </View>
 
@@ -283,5 +301,6 @@ const styles = StyleSheet.create({
     borderTopWidth: hairline,
     borderTopColor: colors.borderHairline,
     paddingTop: spacing.lg,
+    gap: spacing.sm,
   },
 });
