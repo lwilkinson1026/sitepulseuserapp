@@ -308,13 +308,29 @@ class EngineSupervisor:
 
     def _load_supervisor_config(self) -> Dict[str, Any]:
         cfg = dict(DEFAULT_SUPERVISOR_CONFIG)
+        # Phase G.5 sub-config (voltages, intervals, etc.) lives here.
         try:
             snap = self.db.document(f"units/{self.unit_id}/config/engine").get()
             if snap.exists:
                 block = (snap.to_dict() or {}).get("supervisor", {})
                 cfg.update(block)
         except Exception as e:
-            print(f"[supervisor] config read failed: {e!r}", flush=True)
+            print(f"[supervisor] config/engine read failed: {e!r}", flush=True)
+
+        # The user-facing "Auto Recharge" toggle on the Schedule tab writes
+        # to config/charge.enabled (carried over from the legacy Phase C
+        # scheduler). Treat that as the master enable for the supervisor —
+        # if it's on, the supervisor activates regardless of any value left
+        # in config/engine.supervisor.enabled. This keeps the app's existing
+        # toggle as the single source of truth without needing app changes.
+        try:
+            charge_snap = self.db.document(f"units/{self.unit_id}/config/charge").get()
+            if charge_snap.exists:
+                if bool((charge_snap.to_dict() or {}).get("enabled", False)):
+                    cfg["enabled"] = True
+        except Exception as e:
+            print(f"[supervisor] config/charge read failed: {e!r}", flush=True)
+
         return cfg
 
     def _load_voltage_stop(self) -> float:
