@@ -154,50 +154,66 @@ class VescListener:
             )
             return
 
-        # Open the bus once. If can0 isn't up, bail with a clear log and let
-        # the publisher continue without VESC fields — Predator I²C is the
-        # primary data source either way.
-        try:
-            bus = can.Bus(channel=self.iface, interface="socketcan")
-        except Exception as e:
+        # Outer loop: keep trying to (re)open can0 forever, so a boot race
+        # against sitepulse-can.service or a runtime cable drop doesn't
+        # silently kill the thread.
+        while not self._stop.is_set():
+            bus = self._open_bus_with_retry(can)
+            if bus is None:
+                return  # stop() was called while we were waiting
             print(
-                f"[vesc] cannot open {self.iface}: {e!r} "
-                f"(is sitepulse-can.service running?)",
+                f"[vesc] listening on {self.iface}, filtering unit_id={self.unit_id}",
                 flush=True,
             )
-            return
-
-        print(
-            f"[vesc] listening on {self.iface}, filtering unit_id={self.unit_id}",
-            flush=True,
-        )
-        try:
-            while not self._stop.is_set():
-                msg = bus.recv(timeout=1.0)
-                if msg is None:
-                    continue
-                if not msg.is_extended_id:
-                    continue
-                cmd = (msg.arbitration_id >> 8) & 0xFF
-                unit = msg.arbitration_id & 0xFF
-                if unit != self.unit_id:
-                    continue
-                if cmd not in _STATUS_CMDS:
-                    continue
-                if self.debug:
-                    print(
-                        f"[vesc] cmd={cmd} unit={unit} data={msg.data.hex()}",
-                        flush=True,
-                    )
-                self._handle_frame(cmd, bytes(msg.data))
-        except Exception as e:
-            print(f"[vesc] listener error: {e!r}", flush=True)
-        finally:
             try:
-                bus.shutdown()
-            except Exception:
-                pass
-            print("[vesc] listener stopped", flush=True)
+                while not self._stop.is_set():
+                    msg = bus.recv(timeout=1.0)
+                    if msg is None:
+                        continue
+                    if not msg.is_extended_id:
+                        continue
+                    cmd = (msg.arbitration_id >> 8) & 0xFF
+                    unit = msg.arbitration_id & 0xFF
+                    if unit != self.unit_id:
+                        continue
+                    if cmd not in _STATUS_CMDS:
+                        continue
+                    if self.debug:
+                        print(
+                            f"[vesc] cmd={cmd} unit={unit} data={msg.data.hex()}",
+                            flush=True,
+                        )
+                    self._handle_frame(cmd, bytes(msg.data))
+            except Exception as e:
+                print(
+                    f"[vesc] recv error: {e!r} — closing bus and retrying open",
+                    flush=True,
+                )
+            finally:
+                try:
+                    bus.shutdown()
+                except Exception:
+                    pass
+        print("[vesc] listener stopped", flush=True)
+
+    def _open_bus_with_retry(self, can_mod: Any) -> Any:
+        """Block until can0 opens or stop() is called. Returns the bus, or
+        None if we were asked to stop while waiting."""
+        delay = 2.0
+        while not self._stop.is_set():
+            try:
+                return can_mod.Bus(channel=self.iface, interface="socketcan")
+            except Exception as e:
+                print(
+                    f"[vesc] cannot open {self.iface}: {e!r} "
+                    f"(is sitepulse-can.service running?) — retrying in {delay:.0f}s",
+                    flush=True,
+                )
+            # Wait on the stop event so .stop() wakes us immediately.
+            if self._stop.wait(timeout=delay):
+                return None
+            delay = min(delay * 2, 30.0)
+        return None
 
     def _handle_frame(self, cmd: int, data: bytes) -> None:
         if len(data) < 8:
