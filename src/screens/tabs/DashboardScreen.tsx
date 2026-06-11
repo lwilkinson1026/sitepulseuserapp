@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
@@ -13,6 +13,7 @@ import {
   toggleAc,
   wakeLcd,
 } from '../../firebase/commands';
+import { confirm } from '../../lib/confirm';
 import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
@@ -95,119 +96,99 @@ export function DashboardScreen() {
   const [crankBusy, setCrankBusy] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
 
-  const onCrankPress = () => {
+  const onCrankPress = async () => {
     if (!user || crankBusy) return;
-    Alert.alert(
-      'Crank Engine?',
-      'This is the low-level crank — it only spins the starter motor. ' +
+    const ok = await confirm({
+      title: 'Crank Engine?',
+      message:
+        'This is the low-level crank — it only spins the starter motor. ' +
         'It does NOT set the choke or enable the spark relay. Use "Start Engine" ' +
         'for a normal start; use this only for bench testing.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Crank',
-          style: 'destructive',
-          onPress: async () => {
-            setCrankBusy(true);
-            try {
-              await crankEngine(DEV_UNIT_ID, user.uid);
-            } catch (e) {
-              console.warn('[dashboard] crankEngine failed', e);
-            } finally {
-              setTimeout(() => setCrankBusy(false), 6000);
-            }
-          },
-        },
-      ],
-    );
+      confirmLabel: 'Crank',
+      destructive: true,
+    });
+    if (!ok) return;
+    setCrankBusy(true);
+    try {
+      await crankEngine(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      console.warn('[dashboard] crankEngine failed', e);
+    } finally {
+      setTimeout(() => setCrankBusy(false), 6000);
+    }
   };
 
   const [chargeBusy, setChargeBusy] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
 
-  const onChargePress = () => {
+  const onChargePress = async () => {
     if (!user || chargeBusy) return;
-    Alert.alert(
-      'Begin Charging?',
-      'Engine must already be running. Will apply a regen load (default 10A) ' +
+    const ok = await confirm({
+      title: 'Begin Charging?',
+      message:
+        'Engine must already be running. Will apply a regen load (default 10A) ' +
         'and monitor pack voltage; stops automatically when voltage hits the ' +
         'configured threshold, or you can tap Stop Engine at any time.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Charge',
-          onPress: async () => {
-            setChargeBusy(true);
-            try {
-              await chargeEngine(DEV_UNIT_ID, user.uid);
-            } catch (e) {
-              console.warn('[dashboard] chargeEngine failed', e);
-            } finally {
-              // Charge ack is fast (it just spawns the bg thread). 1.5s
-              // is enough; the actual charging continues in the background.
-              setTimeout(() => setChargeBusy(false), 1500);
-            }
-          },
-        },
-      ],
-    );
+      confirmLabel: 'Charge',
+    });
+    if (!ok) return;
+    setChargeBusy(true);
+    try {
+      await chargeEngine(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      console.warn('[dashboard] chargeEngine failed', e);
+    } finally {
+      // Charge ack is fast (it just spawns the bg thread). 1.5s is enough;
+      // the actual charging continues in the background.
+      setTimeout(() => setChargeBusy(false), 1500);
+    }
   };
 
-  const onStopPress = () => {
+  const onStopPress = async () => {
     if (!user || stopBusy) return;
-    Alert.alert(
-      'Stop Engine?',
-      'Aborts any active charge loop, opens the spark relay, and waits for ' +
+    const ok = await confirm({
+      title: 'Stop Engine?',
+      message:
+        'Aborts any active charge loop, opens the spark relay, and waits for ' +
         'the engine to coast to a stop.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Stop',
-          style: 'destructive',
-          onPress: async () => {
-            setStopBusy(true);
-            try {
-              await stopEngine(DEV_UNIT_ID, user.uid);
-            } catch (e) {
-              console.warn('[dashboard] stopEngine failed', e);
-            } finally {
-              // Stop sequence includes up to 15s RPM-wait — lock out longer.
-              setTimeout(() => setStopBusy(false), 18000);
-            }
-          },
-        },
-      ],
-    );
+      confirmLabel: 'Stop',
+      destructive: true,
+    });
+    if (!ok) return;
+    setStopBusy(true);
+    try {
+      await stopEngine(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      console.warn('[dashboard] stopEngine failed', e);
+    } finally {
+      // Stop sequence includes up to 15s RPM-wait — lock out longer.
+      setTimeout(() => setStopBusy(false), 18000);
+    }
   };
 
-  const onStartPress = () => {
+  const onStartPress = async () => {
     if (!user || startBusy) return;
-    Alert.alert(
-      'Start Engine?',
-      'This will set the choke, energize the spark relay, and crank the engine. ' +
+    const ok = await confirm({
+      title: 'Start Engine?',
+      message:
+        'This will set the choke, energize the spark relay, and crank the engine. ' +
         'On success the choke opens automatically; on failure the choke and spark ' +
         'are reset. Make sure the area around the engine is clear.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Start',
-          style: 'destructive',
-          onPress: async () => {
-            setStartBusy(true);
-            try {
-              await startEngine(DEV_UNIT_ID, user.uid);
-            } catch (e) {
-              console.warn('[dashboard] startEngine failed', e);
-            } finally {
-              // Lock out for ~10s — covers worst-case sequence: choke settle
-              // (0.5s) + spark settle (0.2s) + crank (≤4s) + post-catch (2s)
-              // + slack for the Pi to publish the final state.
-              setTimeout(() => setStartBusy(false), 10000);
-            }
-          },
-        },
-      ],
-    );
+      confirmLabel: 'Start',
+      destructive: true,
+    });
+    if (!ok) return;
+    setStartBusy(true);
+    try {
+      await startEngine(DEV_UNIT_ID, user.uid);
+    } catch (e) {
+      console.warn('[dashboard] startEngine failed', e);
+    } finally {
+      // Lock out for ~10s — covers worst-case sequence: choke settle (0.5s)
+      // + spark settle (0.2s) + crank (≤4s) + post-catch (2s) + slack for
+      // the Pi to publish the final state.
+      setTimeout(() => setStartBusy(false), 10000);
+    }
   };
 
   if (loading) {
