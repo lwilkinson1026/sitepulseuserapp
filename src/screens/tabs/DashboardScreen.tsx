@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
+import { useUnitDoc } from '../../hooks/useUnitDoc';
 import { useAuth } from '../../hooks/AuthContext';
+import type { EngineState } from '../../firebase/types';
 import {
   chargeEngine,
   crankEngine,
@@ -23,6 +25,15 @@ import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../the
 
 const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 
+// Engine controls (Start / Stop / Charge / Crank) live behind this flag.
+// They expose tuning + bench-test surface that doesn't belong on a regular
+// user's main screen — set `EXPO_PUBLIC_ADMIN_MODE=true` in .env to surface
+// them. Wake LCD and Aux remain visible to all users since those drive the
+// Predator's display and AC outlet button. Until a real role system lands
+// in Firestore, this is a build-time gate, not authorization — anyone with
+// a custom build of the app could flip it. It's strictly UX hygiene.
+const ADMIN_MODE = process.env.EXPO_PUBLIC_ADMIN_MODE === 'true';
+
 const STALENESS_LABEL: Record<string, string> = {
   fresh: 'LIVE',
   stale: 'STALE',
@@ -37,6 +48,11 @@ function fmt(value: number | undefined | null, digits = 1): string {
 
 export function DashboardScreen() {
   const { loading, snapshot, staleness, error } = useUnitTelemetry(DEV_UNIT_ID);
+  // Subscribe to the Pi-published engine runtime state so we can flip the
+  // charging-input tile on only when the regen loop is actively running.
+  // Same doc the ScheduleScreen reads — the Pi merges scheduler and runtime
+  // fields together, so this read may contain both shapes.
+  const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
   const { user } = useAuth();
   // 'pending' covers the brief window between tap and Pi ack. We don't
   // round-trip the ack into here yet — just debounce by time to prevent
@@ -238,13 +254,37 @@ export function DashboardScreen() {
   // SOC display priority: LCD reading first (accurate when fresh); fall
   // back to VESC-voltage-derived estimate so we always have *something*
   // to show during the windows when the Predator LCD is asleep.
-  const vescSoc = vescVoltsToSoc(snapshot.motor_volts);
+  // Passing motor_amps_in lets the estimator subtract the IR voltage rise
+  // during regen (so charging doesn't inflate the SoC) and add it back
+  // during cranking (so the drop doesn't show a fake plunge).
+  const vescSoc = vescVoltsToSoc(snapshot.motor_volts, snapshot.motor_amps_in);
   const usingVescFallback =
     (snapshot.battery_soc === null || snapshot.battery_soc === undefined) &&
     vescSoc !== null;
   const socStr = usingVescFallback ? String(vescSoc) : fmt(snapshot.battery_soc, 0);
   const stalenessKind =
     staleness === 'fresh' ? 'fresh' : staleness === 'stale' ? 'stale' : 'offline';
+
+  // Live charging readout. Only rendered while the Pi reports state ===
+  // 'charging' AND the VESC telemetry is fresh — otherwise we'd be showing
+  // a frozen number from the last frame before the bus stalled.
+  // Sign convention: during regen, motor_amps_in flows OUT of the
+  // controller into the pack, which VESC reports as negative. Take abs
+  // for display; the user thinks of it as "amps going into the battery".
+  const isCharging = engineState.data?.state === 'charging';
+  const motorFresh =
+    snapshot.motor_amps_in !== undefined &&
+    snapshot.motor_volts !== undefined &&
+    !snapshot.motor_stale;
+  const showChargeTile = isCharging && motorFresh;
+  const chargeAmps = showChargeTile
+    ? Math.abs(snapshot.motor_amps_in as number)
+    : null;
+  const chargeWatts = showChargeTile
+    ? Math.abs(
+        (snapshot.motor_amps_in as number) * (snapshot.motor_volts as number),
+      )
+    : null;
 
   return (
     <Screen>
@@ -288,6 +328,19 @@ export function DashboardScreen() {
           </Text>
         </View>
 
+        {showChargeTile && (
+          <View style={styles.metricGroup}>
+            <Eyebrow parts={['Charging input', 'LIVE']} />
+            <View style={styles.metricRow}>
+              <Text style={styles.metricBig}>{fmt(chargeAmps, 1)}</Text>
+              <Text style={styles.metricUnit}>A</Text>
+            </View>
+            <Text style={styles.metricSub}>
+              {fmt(chargeWatts, 0)} W into pack
+            </Text>
+          </View>
+        )}
+
         <View style={styles.metricGroup}>
           <Eyebrow parts={['Time to empty']} />
           <View style={styles.metricRow}>
@@ -316,27 +369,33 @@ export function DashboardScreen() {
             onPress={onAcPress}
             disabled={acBusy || !user}
           />
-          <SecondaryCTA
-            label={startBusy ? 'Starting…' : 'Start Engine'}
-            onPress={onStartPress}
-            disabled={startBusy || !user}
-          />
-          <SecondaryCTA
-            label={chargeBusy ? 'Engaging…' : 'Charge'}
-            onPress={onChargePress}
-            disabled={chargeBusy || !user}
-          />
-          <SecondaryCTA
-            label={stopBusy ? 'Stopping…' : 'Stop Engine'}
-            onPress={onStopPress}
-            disabled={stopBusy || !user}
-          />
-          <SecondaryCTA
-            label={crankBusy ? 'Cranking…' : 'Crank Engine'}
-            onPress={onCrankPress}
-            disabled={crankBusy || !user}
-          />
         </View>
+
+        {ADMIN_MODE ? (
+          <View style={styles.adminGroup}>
+            <Eyebrow parts={['Admin · engine controls']} />
+            <SecondaryCTA
+              label={startBusy ? 'Starting…' : 'Start Engine'}
+              onPress={onStartPress}
+              disabled={startBusy || !user}
+            />
+            <SecondaryCTA
+              label={chargeBusy ? 'Engaging…' : 'Charge'}
+              onPress={onChargePress}
+              disabled={chargeBusy || !user}
+            />
+            <SecondaryCTA
+              label={stopBusy ? 'Stopping…' : 'Stop Engine'}
+              onPress={onStopPress}
+              disabled={stopBusy || !user}
+            />
+            <SecondaryCTA
+              label={crankBusy ? 'Cranking…' : 'Crank Engine'}
+              onPress={onCrankPress}
+              disabled={crankBusy || !user}
+            />
+          </View>
+        ) : null}
 
         <FigCaption number={1} label="Dashboard" detail={DEV_UNIT_ID} />
       </ScrollView>
@@ -454,6 +513,15 @@ const styles = StyleSheet.create({
     letterSpacing: tracking.monoCaps,
   },
   actionGroup: {
+    borderTopWidth: hairline,
+    borderTopColor: colors.borderHairline,
+    paddingTop: spacing.lg,
+    gap: spacing.sm,
+  },
+  adminGroup: {
+    // Visually separate the admin-only engine controls so it's clear they
+    // aren't part of the regular user surface. Same hairline divider + gap
+    // pattern as the action group above.
     borderTopWidth: hairline,
     borderTopColor: colors.borderHairline,
     paddingTop: spacing.lg,

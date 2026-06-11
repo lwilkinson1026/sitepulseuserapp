@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -270,6 +270,29 @@ export function SentryScreen() {
 }
 
 // ─── live stream card ─────────────────────────────────────────────────────
+//
+// Stream lifecycle phases:
+//   idle       — no stream requested. Show "GO LIVE" button.
+//   connecting — Pi reports streaming, but Cloudflare's HLS manifest takes
+//                ~5–15 s to become playable after RTMP ingest starts. We
+//                hold off mounting the player and show a spinner instead,
+//                so the iOS player doesn't render its persistent
+//                "media unavailable" slashed-play icon.
+//   playing    — grace elapsed; player is mounted. If expo-video signals
+//                readyToPlay we transition here early.
+//   failed     — player has been mounted for the failure window without
+//                ever reaching readyToPlay. Show retry + stop.
+//
+// CONNECT_GRACE_MS: covers Cloudflare ingest warmup. ~8 s is comfortably
+//   above the typical 5–6 s; bumping higher just delays valid streams.
+// PLAYBACK_FAIL_MS: how long after mount we tolerate the player not
+//   becoming ready before declaring failure. 15 s covers slow Starlink
+//   uplinks; below that we'd false-alarm on a fresh stream.
+
+const CONNECT_GRACE_MS = 8000;
+const PLAYBACK_FAIL_MS = 15000;
+
+type StreamPhase = 'idle' | 'connecting' | 'playing' | 'failed';
 
 function LiveStreamCard({
   streaming,
@@ -284,15 +307,87 @@ function LiveStreamCard({
   onGoLive: () => void;
   onStop: () => void;
 }) {
-  // useVideoPlayer needs a stable source ref; pass empty string when off
-  // so the hook stays mounted but the player has nothing to play.
-  const livePlayer = useVideoPlayer(streaming && hlsUrl ? hlsUrl : '', (p) => {
+  const [phase, setPhase] = useState<StreamPhase>('idle');
+  const failTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // useVideoPlayer needs a stable source ref; pass empty string when we're
+  // not yet trying to play so the player stays unmounted-equivalent.
+  const shouldPlay = (phase === 'playing' || phase === 'failed') && !!hlsUrl;
+  const livePlayer = useVideoPlayer(shouldPlay ? hlsUrl! : '', (p) => {
     p.loop = false;
     p.muted = false;
-    if (streaming && hlsUrl) p.play();
+    if (shouldPlay) p.play();
   });
 
-  if (streaming && hlsUrl) {
+  // Drive the phase state machine from the Pi-reported `streaming` flag.
+  // When streaming flips false at any point, we collapse back to idle.
+  useEffect(() => {
+    if (!streaming || !hlsUrl) {
+      if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
+      if (failTimerRef.current) clearTimeout(failTimerRef.current);
+      graceTimerRef.current = null;
+      failTimerRef.current = null;
+      setPhase('idle');
+      return;
+    }
+    // streaming just became true (or component just mounted with it true).
+    setPhase('connecting');
+    graceTimerRef.current = setTimeout(() => {
+      setPhase('playing');
+      // Once we mount the player, start a failure deadline. If the player
+      // signals readyToPlay before then, the listener below clears it.
+      failTimerRef.current = setTimeout(() => {
+        setPhase('failed');
+      }, PLAYBACK_FAIL_MS);
+    }, CONNECT_GRACE_MS);
+    return () => {
+      if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
+      if (failTimerRef.current) clearTimeout(failTimerRef.current);
+    };
+  }, [streaming, hlsUrl]);
+
+  // Cancel the failure deadline as soon as the player is genuinely playable.
+  useEffect(() => {
+    if (!livePlayer) return;
+    const sub = livePlayer.addListener('statusChange', (event) => {
+      // expo-video's StatusChangeEventPayload has the new status under `status`.
+      if (event?.status === 'readyToPlay' && failTimerRef.current) {
+        clearTimeout(failTimerRef.current);
+        failTimerRef.current = null;
+      }
+      if (event?.status === 'error') {
+        setPhase('failed');
+      }
+    });
+    return () => sub.remove();
+  }, [livePlayer]);
+
+  const handleRetry = () => {
+    // Tear down the stream on the Pi, then re-issue start after a beat
+    // so the ffmpeg process has time to release the camera.
+    onStop();
+    setTimeout(onGoLive, 1500);
+  };
+
+  if (phase === 'connecting') {
+    return (
+      <View style={styles.streamCard}>
+        <View style={styles.streamConnectingBox}>
+          <ActivityIndicator color={colors.textMuted} />
+          <Text style={styles.streamPlaceholder}>CONNECTING…</Text>
+          <Text style={styles.streamHint}>
+            WAITING FOR CLOUDFLARE TO INGEST THE STREAM (5–10 S)
+          </Text>
+        </View>
+        <Pressable onPress={onStop} style={styles.streamStopButton}>
+          <Text style={styles.streamStopButtonLabel}>CANCEL</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (phase === 'playing') {
     return (
       <View style={styles.streamCard}>
         <VideoView
@@ -309,6 +404,28 @@ function LiveStreamCard({
     );
   }
 
+  if (phase === 'failed') {
+    return (
+      <View style={styles.streamCard}>
+        <Text style={styles.streamPlaceholder}>STREAM UNAVAILABLE</Text>
+        <Text style={styles.streamHint}>
+          PI REPORTS LIVE BUT THE PLAYBACK URL ISN’T RESPONDING. CHECK THAT
+          THE CLOUDFLARE ENV IS SET ON THE PI AND THAT FFMPEG IS REACHING
+          CLOUDFLARE.
+        </Text>
+        <View style={styles.streamFailedActions}>
+          <Pressable onPress={handleRetry} style={styles.streamButton}>
+            <Text style={styles.streamButtonLabel}>RETRY</Text>
+          </Pressable>
+          <Pressable onPress={onStop} style={styles.streamStopButton}>
+            <Text style={styles.streamStopButtonLabel}>STOP</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  // phase === 'idle'
   return (
     <View style={styles.streamCard}>
       <Text style={styles.streamPlaceholder}>
@@ -500,6 +617,20 @@ const styles = StyleSheet.create({
     borderWidth: hairline,
     borderColor: colors.danger,
     alignSelf: 'center',
+  },
+  streamConnectingBox: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    padding: spacing.lg,
+  },
+  streamFailedActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
   },
   streamStopButtonLabel: {
     color: colors.danger,

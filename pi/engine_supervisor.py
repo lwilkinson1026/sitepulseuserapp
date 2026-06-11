@@ -8,7 +8,10 @@ round-trip).
 
 Decision logic per tick
 -----------------------
-Reads `current/snapshot.motor_volts` and `current/engine.state`, then:
+Each tick wakes the Predator LCD (so battery_soc and time_to_empty are
+fresh), reads the snapshot + engine state, resolves SoC from the best
+available signal (LCD coulomb-counted = primary, VESC voltage-derived =
+fallback), then evaluates:
 
   enabled == false                                  → no-op (manual mode)
   in cooldown after recent action                   → no-op (back-off window)
@@ -16,12 +19,26 @@ Reads `current/snapshot.motor_volts` and `current/engine.state`, then:
   state startswith "failed"                         → no-op (manual review)
   state == charging                                 → no-op (charge loop owns it)
 
-  state == idle, voltage <= voltageCritical,
-    AND (quiet hours OFF OR allowQuietOverride)     → auto-start cycle
-  state == idle, voltage <= voltageStart, no quiet  → auto-start cycle
+  state == idle, soc <= socCritical,
+    AND (quiet hours OFF OR allowQuietOverride)     → auto-start ("critical_soc")
+  state == idle, soc <= socStart, no quiet          → auto-start ("low_soc")
+  state == idle, ttempty <= runwayThresholdMin
+    AND soc <= proactiveSocCeiling, no quiet        → auto-start ("load_aware")
 
-  state == running, voltage >= voltageStop          → auto-stop
-  state == running, voltage <  voltageStop          → auto-charge
+  state == running, soc >= socStop,
+    AND (ttempty is None OR ttempty >= sustainableRunwayMin)
+                                                    → auto-stop
+  state == running, soc >= socStop, load is heavy   → keep running (defer stop)
+  state == running, soc <  socStop                  → auto-charge
+
+The "load-aware" branch is what prevents the scenario where a heavy AC
+load drains the pack while we wait for the SoC threshold — by then the
+engine can no longer keep up. ttempty is the Predator BMS's load-aware
+runway prediction (in minutes) and is the cleanest signal we have.
+
+The "keep running" branch is the converse: don't stop the engine just
+because pack hit 85% if there's still a heavy load — we'd just have to
+restart immediately.
 
 Auto-start cycle blocks on handle_engine_start until catch or failure,
 then immediately fires handle_engine_charge (which spawns the bg charge
@@ -56,24 +73,78 @@ from firebase_admin import firestore
 
 DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
     # Opt-in. Set true in Firestore (or via a future app toggle) to enable.
-    "enabled":            False,
-    # Voltage thresholds for 14S LiFePO4 (~46.5 V ≈ 20 % SOC,
-    # ~45.5 V ≈ 10 % SOC). Tune empirically vs the LCD's SOC reading.
-    "voltageStart":       46.5,   # below this → auto-start (in active window)
-    "voltageCritical":    45.5,   # below this → start regardless of quiet hours
-                                  # (if allowQuietOverride is true)
-    # How often the supervisor evaluates state. Voltage doesn't change
-    # fast so 15-30s is plenty. Tick lower during development for faster
-    # feedback.
-    "tickIntervalSec":    15,
-    # After firing any auto-action, ignore further triggers for this long
-    # so we don't double-fire while state is settling. Should be longer
-    # than the longest expected action (engine start ≈ 6-10s).
-    "actionCooldownSec":  60,
+    "enabled":               False,
+
+    # Primary decision signal: Predator LCD coulomb-counted SoC (0-100 %).
+    # Used when battery_soc is present in the snapshot.
+    "socStart":              25,    # ≤ this → auto-start (in active window)
+    "socCritical":           12,    # ≤ this → start regardless of quiet hours
+    "socStop":               85,    # ≥ this → auto-stop (subject to load guard)
+
+    # Load-aware proactive start: if the Predator BMS's runway estimate
+    # (time_to_empty_minutes) drops below threshold AND SoC is also at
+    # least somewhat depleted, fire the engine BEFORE we actually hit
+    # socStart. Prevents the "pack drained before engine could catch up"
+    # scenario under sustained heavy load.
+    "runwayThresholdMin":    60,    # if runway ≤ this → consider proactive start
+    "proactiveSocCeiling":   60,    # but ONLY if SoC ≤ this (no fires at 95%)
+
+    # Load-aware stop guard: don't auto-stop the engine if the BMS runway
+    # under current load is short — we'd just have to immediately restart.
+    "sustainableRunwayMin":  180,   # only stop if runway ≥ this OR no load
+
+    # Voltage fallback for when LCD is asleep AND battery_soc is null in
+    # the snapshot. Curve is 15S LiFePO4; see _volts_to_soc_15s below
+    # and src/lib/voltageSoc.ts for the matching display curve.
+    "voltageStart":          48.0,
+    "voltageCritical":       46.5,
+
+    # How often the supervisor evaluates state. Each tick wakes the LCD
+    # before reading, so don't tick too aggressively or the servo wears
+    # out. 15-30s is plenty.
+    "tickIntervalSec":       15,
+    # After firing any auto-action, ignore further triggers for this long.
+    "actionCooldownSec":     60,
     # Honor config/charge.quietHours when deciding whether to start.
-    # voltageCritical override still applies if allowQuietOverride=true.
-    "respectQuietHours":  True,
+    # socCritical override still applies if allowQuietOverride=true.
+    "respectQuietHours":     True,
 }
+
+
+# Voltage → SoC curve for the 15S LiFePO4 pack. Mirror of CURVE in
+# src/lib/voltageSoc.ts — keep both in sync if you adjust either. This
+# is the SoC fallback when Predator LCD is unavailable (asleep, servo
+# failed). Note it's voltage-only and doesn't compensate for load IR
+# drop, so under heavy load it will read low; that's why the LCD path
+# is primary.
+_SOC_CURVE_15S = (
+    (45.0,   0),
+    (46.5,  10),
+    (48.0,  20),
+    (48.5,  30),
+    (49.0,  50),
+    (49.5,  70),
+    (50.25, 80),
+    (51.5,  90),
+    (52.5,  95),
+    (53.25, 100),
+)
+
+
+def _volts_to_soc_15s(v: float) -> int:
+    """Linearly interpolate the 15S LiFePO4 voltage→SoC curve. Clamps to
+    [0, 100] outside the curve range."""
+    if v <= _SOC_CURVE_15S[0][0]:
+        return 0
+    if v >= _SOC_CURVE_15S[-1][0]:
+        return 100
+    for i in range(1, len(_SOC_CURVE_15S)):
+        hi_v, hi_s = _SOC_CURVE_15S[i]
+        if v <= hi_v:
+            lo_v, lo_s = _SOC_CURVE_15S[i - 1]
+            t = (v - lo_v) / (hi_v - lo_v)
+            return round(lo_s + t * (hi_s - lo_s))
+    return 100  # unreachable; satisfies type checker
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -157,10 +228,12 @@ class EngineSupervisor:
         if self._in_cooldown(cfg):
             return
 
-        state, voltage = self._read_engine_and_voltage()
-        if voltage is None:
-            # No telemetry — wait for the publisher to populate.
-            return
+        # Pre-wake the Predator LCD so battery_soc and time_to_empty are
+        # fresh at decision time. Best effort — if the servo fails, we
+        # fall through to whatever's in the snapshot.
+        self._pre_wake_lcd()
+
+        state, telem = self._read_engine_telemetry()
 
         # Action-in-flight states: don't touch anything.
         if state in ("starting", "cranking", "stopping"):
@@ -172,26 +245,61 @@ class EngineSupervisor:
         if state == "charging":
             return
 
-        v_start    = float(cfg.get("voltageStart",    46.5))
-        v_critical = float(cfg.get("voltageCritical", 45.5))
-        v_stop     = float(self._load_voltage_stop())
+        # Resolve SoC from best available source.
+        soc, soc_source = self._resolve_soc(telem)
+        if soc is None:
+            # Neither Predator nor VESC fallback has data — wait next tick.
+            return
+
+        soc_start    = int(cfg.get("socStart",    25))
+        soc_critical = int(cfg.get("socCritical", 12))
+        soc_stop     = int(cfg.get("socStop",     85))
+        runway_thr   = int(cfg.get("runwayThresholdMin",    60))
+        proactive_lim = int(cfg.get("proactiveSocCeiling",  60))
+        sustainable  = int(cfg.get("sustainableRunwayMin", 180))
 
         in_quiet = bool(cfg.get("respectQuietHours", True)) and self._is_quiet_hours()
         allow_quiet_override = self._load_allow_quiet_override()
 
+        ttempty = telem.get("ttempty")  # minutes, or None
+
         if state in (None, "idle"):
-            if voltage <= v_critical and (not in_quiet or allow_quiet_override):
-                self._auto_start_cycle(voltage, v_critical, "critical")
-            elif voltage <= v_start and not in_quiet:
-                self._auto_start_cycle(voltage, v_start, "normal")
+            # 1. Critical SoC — fires even in quiet hours if user allowed it.
+            if soc <= soc_critical and (not in_quiet or allow_quiet_override):
+                self._auto_start_cycle(soc, soc_source, ttempty, "critical_soc")
+                return
+            # 2. Normal low-SoC trigger.
+            if soc <= soc_start and not in_quiet:
+                self._auto_start_cycle(soc, soc_source, ttempty, "low_soc")
+                return
+            # 3. Load-aware proactive start: short runway AND already somewhat
+            #    depleted. The ceiling prevents firing on transient spikes
+            #    at high SoC (e.g. brief vacuum or power-tool use at 95%).
+            if (
+                ttempty is not None
+                and ttempty <= runway_thr
+                and soc <= proactive_lim
+                and not in_quiet
+            ):
+                self._auto_start_cycle(soc, soc_source, ttempty, "load_aware")
+                return
             return
 
         if state == "running":
-            if voltage >= v_stop:
-                self._auto_stop(voltage, v_stop)
-            else:
-                # Engine is running, pack still below stop voltage → load it.
-                self._auto_charge(voltage, v_stop)
+            if soc >= soc_stop:
+                # Pack is full; should we actually stop, or is load too heavy?
+                load_ok = ttempty is None or ttempty >= sustainable
+                if load_ok:
+                    self._auto_stop(soc, soc_source, ttempty)
+                else:
+                    # Defer stop — heavy load means we'd immediately restart.
+                    # Charge loop will naturally back off SET_CURRENT as
+                    # voltage settles near voltageStop; engine idles + carries
+                    # the load directly.
+                    self._note_keep_running(soc, ttempty, sustainable)
+                return
+            # SoC below stop threshold → continue (or start) charging.
+            self._auto_charge(soc, soc_source)
             return
 
         # Unknown state — log once and back off.
@@ -199,19 +307,35 @@ class EngineSupervisor:
 
     # ── auto-actions ──────────────────────────────────────────────────────
 
-    def _auto_start_cycle(self, voltage: float, threshold: float, reason: str) -> None:
+    def _auto_start_cycle(
+        self,
+        soc: int,
+        soc_source: str,
+        ttempty: Optional[int],
+        reason: str,
+    ) -> None:
         """engine.start (synchronous) → if caught, engine.charge (async).
         Single-action with a chained charge so we're not waiting an entire
-        tick interval to begin loading the engine."""
+        tick interval to begin loading the engine.
+
+        `reason` is one of: critical_soc, low_soc, load_aware. Goes into
+        the event feed so the user can see why each auto-start fired.
+        """
         # Import lazily so this module imports cleanly on a Mac without
         # the Pi hardware deps.
         from engine import handle_engine_start, handle_engine_charge
 
+        msg_runway = f", runway={ttempty}m" if ttempty is not None else ""
         self._log_event(
             "engine.auto_start",
-            f"Auto-starting engine (voltage {voltage:.1f}V ≤ {threshold:.1f}V, {reason})",
+            f"Auto-starting engine (soc={soc}% via {soc_source}{msg_runway}, reason={reason})",
             "info",
-            {"voltage": voltage, "threshold": threshold, "reason": reason},
+            {
+                "soc":        soc,
+                "socSource":  soc_source,
+                "ttempty":    ttempty,
+                "reason":     reason,
+            },
         )
         self._last_action_at = time.monotonic()
         try:
@@ -221,13 +345,13 @@ class EngineSupervisor:
                 "engine.auto_start_failed",
                 f"Auto-start raised: {e}",
                 "warning",
-                {"voltage": voltage, "error": str(e)},
+                {"soc": soc, "reason": reason, "error": str(e)},
             )
             print(f"[supervisor] auto_start failed: {e!r}", flush=True)
             return
 
         # Did it catch?
-        state, _ = self._read_engine_and_voltage()
+        state = self._read_engine_state()
         if state != "running":
             # start macro publishes the failure state itself; we just log
             # that the catch never happened so the event feed has both signals.
@@ -235,7 +359,7 @@ class EngineSupervisor:
                 "engine.auto_start_no_catch",
                 f"Engine.start completed but state={state!r} (no catch)",
                 "warning",
-                {"endState": state},
+                {"endState": state, "reason": reason},
             )
             return
 
@@ -244,20 +368,20 @@ class EngineSupervisor:
             handle_engine_charge(self.db, self.unit_id, {})
             self._log_event(
                 "engine.auto_charge",
-                f"Auto-charging after start (target {self._load_voltage_stop():.1f}V)",
+                f"Auto-charging after start (soc={soc}%, target voltageStop={self._load_voltage_stop():.1f}V)",
                 "info",
-                {"voltage": voltage, "voltageStop": self._load_voltage_stop()},
+                {"soc": soc, "voltageStop": self._load_voltage_stop()},
             )
         except Exception as e:
             self._log_event(
                 "engine.auto_charge_failed",
                 f"Auto-charge raised: {e}",
                 "warning",
-                {"voltage": voltage, "error": str(e)},
+                {"soc": soc, "error": str(e)},
             )
             print(f"[supervisor] auto_charge after start failed: {e!r}", flush=True)
 
-    def _auto_charge(self, voltage: float, v_stop: float) -> None:
+    def _auto_charge(self, soc: int, soc_source: str) -> None:
         """Engine is already running unloaded → load it."""
         from engine import handle_engine_charge
 
@@ -266,9 +390,9 @@ class EngineSupervisor:
             handle_engine_charge(self.db, self.unit_id, {})
             self._log_event(
                 "engine.auto_charge",
-                f"Auto-charging (voltage {voltage:.1f}V; target {v_stop:.1f}V)",
+                f"Auto-charging (soc={soc}% via {soc_source}; target voltageStop={self._load_voltage_stop():.1f}V)",
                 "info",
-                {"voltage": voltage, "voltageStop": v_stop},
+                {"soc": soc, "socSource": soc_source, "voltageStop": self._load_voltage_stop()},
             )
         except Exception as e:
             # Most common: "already charging" — benign, just don't log noisily.
@@ -279,20 +403,21 @@ class EngineSupervisor:
                 "engine.auto_charge_failed",
                 f"Auto-charge raised: {e}",
                 "warning",
-                {"voltage": voltage, "error": msg},
+                {"soc": soc, "error": msg},
             )
             print(f"[supervisor] auto_charge failed: {e!r}", flush=True)
 
-    def _auto_stop(self, voltage: float, threshold: float) -> None:
+    def _auto_stop(self, soc: int, soc_source: str, ttempty: Optional[int]) -> None:
         from engine import handle_engine_stop
 
         self._last_action_at = time.monotonic()
+        msg_runway = f", runway={ttempty}m" if ttempty is not None else ", no load"
         try:
             self._log_event(
                 "engine.auto_stop",
-                f"Auto-stopping (voltage {voltage:.1f}V ≥ {threshold:.1f}V)",
+                f"Auto-stopping (soc={soc}% via {soc_source}{msg_runway})",
                 "info",
-                {"voltage": voltage, "threshold": threshold},
+                {"soc": soc, "socSource": soc_source, "ttempty": ttempty},
             )
             handle_engine_stop(self.db, self.unit_id, {})
         except Exception as e:
@@ -300,9 +425,29 @@ class EngineSupervisor:
                 "engine.auto_stop_failed",
                 f"Auto-stop raised: {e}",
                 "warning",
-                {"voltage": voltage, "error": str(e)},
+                {"soc": soc, "error": str(e)},
             )
             print(f"[supervisor] auto_stop failed: {e!r}", flush=True)
+
+    def _note_keep_running(self, soc: int, ttempty: Optional[int], sustainable: int) -> None:
+        """SoC is at/above stop threshold but load is too heavy to stop —
+        we'd just have to immediately restart. Log once per cooldown so
+        the user sees we're holding off intentionally. Doesn't trigger
+        the action cooldown (no command was issued)."""
+        # Throttle: only log if we haven't logged a keep-running event recently.
+        # Use _last_keep_running_at, separate from _last_action_at.
+        now = time.monotonic()
+        if (now - getattr(self, "_last_keep_running_at", 0.0)) < 300.0:
+            return
+        self._last_keep_running_at = now
+        self._log_event(
+            "engine.keep_running",
+            f"Holding engine running: soc={soc}% (stop threshold met) but "
+            f"runway={ttempty}m < sustainableRunwayMin={sustainable}m — "
+            f"load is heavy, stopping would force immediate restart.",
+            "info",
+            {"soc": soc, "ttempty": ttempty, "sustainableRunwayMin": sustainable},
+        )
 
     # ── readers ───────────────────────────────────────────────────────────
 
@@ -334,14 +479,17 @@ class EngineSupervisor:
         return cfg
 
     def _load_voltage_stop(self) -> float:
+        # 15S LiFePO4 default — used only for logging / event metadata
+        # since the supervisor's decisions are SoC-based now. Charge loop
+        # uses its own config-driven value.
         try:
             snap = self.db.document(f"units/{self.unit_id}/config/engine").get()
             if snap.exists:
                 charge_block = (snap.to_dict() or {}).get("charge", {})
-                return float(charge_block.get("voltageStop", 54.0))
+                return float(charge_block.get("voltageStop", 52.5))
         except Exception:
             pass
-        return 54.0
+        return 52.5
 
     def _load_allow_quiet_override(self) -> bool:
         try:
@@ -365,9 +513,22 @@ class EngineSupervisor:
         except Exception:
             return False
 
-    def _read_engine_and_voltage(self) -> Tuple[Optional[str], Optional[float]]:
+    def _read_engine_telemetry(self) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Read engine state + snapshot fields the supervisor needs.
+
+        Returns (state, telem) where telem has keys:
+          battery_soc      Optional[int]    Predator LCD coulomb-counted SoC
+          ttempty          Optional[int]    Predator time_to_empty_minutes
+          output_watts     Optional[int]    Predator inverter output watts
+          motor_volts      Optional[float]  VESC pack voltage (fallback signal)
+        """
         state: Optional[str] = None
-        voltage: Optional[float] = None
+        telem: Dict[str, Any] = {
+            "battery_soc":  None,
+            "ttempty":      None,
+            "output_watts": None,
+            "motor_volts":  None,
+        }
         try:
             engine_snap = self.db.document(f"units/{self.unit_id}/current/engine").get()
             if engine_snap.exists:
@@ -377,12 +538,73 @@ class EngineSupervisor:
         try:
             snap = self.db.document(f"units/{self.unit_id}/current/snapshot").get()
             if snap.exists:
-                v = (snap.to_dict() or {}).get("motor_volts")
+                d = snap.to_dict() or {}
+                soc = d.get("battery_soc")
+                if isinstance(soc, (int, float)) and 0 <= soc <= 100:
+                    telem["battery_soc"] = int(soc)
+                tte = d.get("time_to_empty_minutes")
+                if isinstance(tte, (int, float)) and tte >= 0:
+                    telem["ttempty"] = int(tte)
+                ow = d.get("output_watts")
+                if isinstance(ow, (int, float)) and ow >= 0:
+                    telem["output_watts"] = int(ow)
+                v = d.get("motor_volts")
                 if isinstance(v, (int, float)):
-                    voltage = float(v)
+                    telem["motor_volts"] = float(v)
         except Exception:
             pass
-        return state, voltage
+        return state, telem
+
+    def _read_engine_state(self) -> Optional[str]:
+        """Lightweight read for the post-start catch check."""
+        try:
+            engine_snap = self.db.document(f"units/{self.unit_id}/current/engine").get()
+            if engine_snap.exists:
+                return (engine_snap.to_dict() or {}).get("state")
+        except Exception:
+            pass
+        return None
+
+    def _resolve_soc(self, telem: Dict[str, Any]) -> Tuple[Optional[int], Optional[str]]:
+        """Pick the best SoC source.
+
+        Predator LCD-derived `battery_soc` is the primary because the
+        Predator BMS coulomb-counts internally — load IR sag doesn't fool
+        it. Falls back to VESC voltage interpreted on the 15S LiFePO4
+        curve when battery_soc is null (LCD asleep, or servo wake failed).
+
+        Returns (soc_pct, source_label) or (None, None) if no signal.
+        """
+        soc = telem.get("battery_soc")
+        if soc is not None:
+            return int(soc), "predator"
+        v = telem.get("motor_volts")
+        if v is not None:
+            return _volts_to_soc_15s(float(v)), "vesc_voltage"
+        return None, None
+
+    def _pre_wake_lcd(self) -> None:
+        """Press the Predator LCD wake button right before reading telemetry,
+        so battery_soc and time_to_empty are guaranteed fresh.
+
+        Best-effort. If the servo or any dependency fails (e.g. tests on a
+        Mac without hardware), swallow and move on — the periodic lcd-wake
+        loop is a separate safety net, and the voltage fallback will catch
+        the supervisor's decisions if both fail.
+        """
+        try:
+            from servos import wake_lcd  # lazy import (Pi-only deps)
+            wake_lcd(self.db, self.unit_id)
+            # Give the BMS + I²C sniffer + publisher a moment to land
+            # fresh frames into the snapshot.
+            time.sleep(1.0)
+        except Exception as e:
+            # Throttle: log once per 10 minutes so this can't spam if the
+            # servo is broken.
+            now = time.monotonic()
+            if (now - getattr(self, "_last_lcd_wake_warn_at", 0.0)) > 600.0:
+                self._last_lcd_wake_warn_at = now
+                print(f"[supervisor] LCD pre-wake failed (best effort): {e!r}", flush=True)
 
     def _in_cooldown(self, cfg: Dict[str, Any]) -> bool:
         cooldown_sec = float(cfg.get("actionCooldownSec", 60))

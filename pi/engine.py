@@ -141,9 +141,10 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # before we know what it can sustain.
     "currentAmps":      10.0,
     # Voltage thresholds. Pack voltage as reported by the VESC.
-    # 14S LiFePO4: ~58 V full, ~54 V is ~90 % SOC, ~46 V is ~10 % SOC.
-    "voltageStop":      54.0,    # exit charge loop when pack rises above this
-    "voltageMinAbort":  44.0,    # abort if pack falls below (engine not generating)
+    # 15S LiFePO4: ~52.8 V resting full (measured), ~51.5 V ≈ 90 % SOC,
+    # ~46.5 V ≈ 10 % SOC. BMS termination ~3.5 V/cell × 15 = 52.5 V.
+    "voltageStop":      52.5,    # exit charge loop when pack rises above this
+    "voltageMinAbort":  46.0,    # abort if pack falls below (engine not generating)
     # Safety ceiling — even with no other exit, charge dies after this much
     # wall-clock time. One hour by default. Code clamps to 2 hours hard max.
     "maxDurationSec":   3600,

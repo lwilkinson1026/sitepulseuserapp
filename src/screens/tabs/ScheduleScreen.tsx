@@ -16,8 +16,10 @@ import { overrideEngine, updateChargeConfig } from '../../firebase/commands';
 import type {
   ChargeConfig,
   ChargeWindow,
+  EngineConfig,
   EngineState,
 } from '../../firebase/types';
+import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase C — engine recharge schedule.
@@ -110,7 +112,7 @@ const PRESETS: Array<{
   },
 ];
 
-const REASON_LABEL: Record<EngineState['reason'], string> = {
+const REASON_LABEL: Record<NonNullable<EngineState['reason']>, string> = {
   soc_low: 'SOC LOW',
   soc_satisfied: 'SOC SATISFIED',
   window_closed: 'WINDOW CLOSED',
@@ -122,6 +124,9 @@ const REASON_LABEL: Record<EngineState['reason'], string> = {
 export function ScheduleScreen() {
   const { user } = useAuth();
   const chargeConfig = useUnitDoc<ChargeConfig>(DEV_UNIT_ID, 'config', 'charge');
+  // The supervisor's actual thresholds live here, not on config/charge —
+  // ChargeConfig.socStart/Stop/Critical are legacy and unused by the Pi.
+  const engineConfig = useUnitDoc<EngineConfig>(DEV_UNIT_ID, 'config', 'engine');
   const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
 
   // Stable derived values + ALL hook calls up-front so hook order is
@@ -139,7 +144,8 @@ export function ScheduleScreen() {
   const [allowQuietOverride, setAllowQuietOverrideOptimistic] =
     useOptimistic(cfg?.allowQuietOverride ?? false);
 
-  const loading = chargeConfig.loading || engineState.loading;
+  const loading =
+    chargeConfig.loading || engineConfig.loading || engineState.loading;
 
   if (!user || loading) {
     return (
@@ -154,9 +160,13 @@ export function ScheduleScreen() {
 
   const desired = eng?.desired ?? 'idle';
   const reason = eng?.reason;
-  const socStart = cfg?.socStart ?? 25;
-  const socStop = cfg?.socStop ?? 85;
-  const socCritical = cfg?.socCritical ?? 12;
+
+  // Voltage thresholds the supervisor actually uses. Defaults mirror
+  // pi/engine_supervisor.py + pi/engine.py DEFAULT_CHARGE_CONFIG so the
+  // UI shows sane numbers even before config/engine is populated.
+  const voltageStart = engineConfig.data?.supervisor?.voltageStart ?? 45.0;
+  const voltageCritical = engineConfig.data?.supervisor?.voltageCritical ?? 44.0;
+  const voltageStop = engineConfig.data?.charge?.voltageStop ?? 54.0;
 
   const onToggleEnabled = (next: boolean) => {
     setEnabledOptimistic(next);
@@ -315,20 +325,23 @@ export function ScheduleScreen() {
         </View>
 
         {/* ── Thresholds (read-only summary for v1) ─────────────────── */}
+        {/* These reflect what the autonomous supervisor actually uses
+            (pack voltage from the VESC). Approximate SoC % is shown in
+            small text as a sanity-check translation via vescVoltsToSoc. */}
         <View style={styles.section}>
-          <Eyebrow parts={['Thresholds', 'LiFePO4 14S']} />
-          <View style={styles.thresholdRow}>
-            <Text style={styles.thresholdKey}>ENGINE STARTS BELOW</Text>
-            <Text style={styles.thresholdValue}>{socStart}%</Text>
-          </View>
-          <View style={styles.thresholdRow}>
-            <Text style={styles.thresholdKey}>ENGINE STOPS ABOVE</Text>
-            <Text style={styles.thresholdValue}>{socStop}%</Text>
-          </View>
-          <View style={styles.thresholdRow}>
-            <Text style={styles.thresholdKey}>NOTIFY AT</Text>
-            <Text style={styles.thresholdValue}>{socCritical}%</Text>
-          </View>
+          <Eyebrow parts={['Thresholds', 'LiFePO4 14S · pack V']} />
+          <ThresholdRow
+            label="ENGINE STARTS BELOW"
+            volts={voltageStart}
+          />
+          <ThresholdRow
+            label="ENGINE STOPS ABOVE"
+            volts={voltageStop}
+          />
+          <ThresholdRow
+            label="CRITICAL (QUIET OVERRIDE)"
+            volts={voltageCritical}
+          />
         </View>
 
         {/* ── Quiet override ────────────────────────────────────────── */}
@@ -353,6 +366,24 @@ export function ScheduleScreen() {
         <FigCaption number={3} label="Schedule" detail={DEV_UNIT_ID} />
       </ScrollView>
     </Screen>
+  );
+}
+
+// Renders one threshold row: label on the left, big voltage on the right
+// with a small "≈ XX%" SoC approximation under it. Voltage is the source
+// of truth — the SoC translation is just user-friendly context.
+function ThresholdRow({ label, volts }: { label: string; volts: number }) {
+  const approxSoc = vescVoltsToSoc(volts);
+  return (
+    <View style={styles.thresholdRow}>
+      <Text style={styles.thresholdKey}>{label}</Text>
+      <View style={styles.thresholdValueCol}>
+        <Text style={styles.thresholdValue}>{volts.toFixed(1)} V</Text>
+        {approxSoc !== null ? (
+          <Text style={styles.thresholdSubValue}>≈ {approxSoc}% SOC</Text>
+        ) : null}
+      </View>
+    </View>
   );
 }
 
@@ -544,10 +575,20 @@ const styles = StyleSheet.create({
     fontSize: typeScale.monoSM,
     letterSpacing: tracking.monoCaps,
   },
+  thresholdValueCol: {
+    alignItems: 'flex-end',
+  },
   thresholdValue: {
     color: colors.textDisplay,
     fontFamily: fonts.mono,
     fontSize: typeScale.monoLG,
+    letterSpacing: tracking.monoCaps,
+  },
+  thresholdSubValue: {
+    marginTop: 2,
+    color: colors.textMuted,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoSM,
     letterSpacing: tracking.monoCaps,
   },
 });

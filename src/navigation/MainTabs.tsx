@@ -7,6 +7,7 @@ import { OutletsScreen } from '../screens/tabs/OutletsScreen';
 import { ScheduleScreen } from '../screens/tabs/ScheduleScreen';
 import { SentryScreen } from '../screens/tabs/SentryScreen';
 import { ActivityScreen } from '../screens/tabs/ActivityScreen';
+import { EngineStatusBar } from '../components/EngineStatusBar';
 import { colors, fonts, hairline } from '../theme';
 import { MainTabsParamList } from './types';
 
@@ -52,29 +53,41 @@ export function MainTabs() {
   const bottomInset = Math.max(insets.bottom, 8);
 
   return (
-    <Tab.Navigator
-      screenOptions={({ route }) => ({
-        headerShown: false,
-        tabBarShowLabel: true,
-        tabBarStyle: [styles.tabBar, { height: 64 + bottomInset, paddingBottom: bottomInset }],
-        tabBarItemStyle: styles.tabItem,
-        tabBarIcon: () => null,
-        tabBarLabel: ({ focused }) => (
-          <TabLabel routeName={route.name as keyof MainTabsParamList} focused={focused} />
-        ),
-        sceneStyle: { backgroundColor: colors.background },
-      })}
-    >
-      <Tab.Screen name="Dashboard" component={DashboardScreen} />
-      <Tab.Screen name="Outlets" component={OutletsScreen} />
-      <Tab.Screen name="Schedule" component={ScheduleScreen} />
-      <Tab.Screen name="Sentry" component={SentryScreen} />
-      <Tab.Screen name="Activity" component={ActivityScreen} />
-    </Tab.Navigator>
+    <View style={styles.root}>
+      {/* Engine status banner — only renders when state ≠ 'idle'.
+          Owns its own top safe-area inset; when visible, child screens'
+          SafeAreaView edges=['top'] receive 0 inset (because the parent
+          already consumed it), so layout flows naturally. */}
+      <EngineStatusBar />
+
+      <Tab.Navigator
+        screenOptions={({ route }) => ({
+          headerShown: false,
+          tabBarShowLabel: true,
+          tabBarStyle: [styles.tabBar, { height: 64 + bottomInset, paddingBottom: bottomInset }],
+          tabBarItemStyle: styles.tabItem,
+          tabBarIcon: () => null,
+          tabBarLabel: ({ focused }) => (
+            <TabLabel routeName={route.name as keyof MainTabsParamList} focused={focused} />
+          ),
+          sceneStyle: { backgroundColor: colors.background },
+        })}
+      >
+        <Tab.Screen name="Dashboard" component={DashboardScreen} />
+        <Tab.Screen name="Outlets" component={OutletsScreen} />
+        <Tab.Screen name="Schedule" component={ScheduleScreen} />
+        <Tab.Screen name="Sentry" component={SentryScreen} />
+        <Tab.Screen name="Activity" component={ActivityScreen} />
+      </Tab.Navigator>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
   tabBar: {
     backgroundColor: colors.background,
     borderTopWidth: hairline,

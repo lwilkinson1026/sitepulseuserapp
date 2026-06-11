@@ -51,3 +51,4 @@ scripts/service-account.json
 .env.production
 .env.preview
 .env.development
+.env*

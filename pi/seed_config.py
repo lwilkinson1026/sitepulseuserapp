@@ -9,7 +9,7 @@ Usage:
 
 Defaults match the locked-in decisions documented in the feature plan:
   - Waveshare RPi Relay Board (B), 3 channels; channel 1 = security light
-  - LiFePO4 14S thresholds: socStart 25, socStop 85, socCritical 12
+  - LiFePO4 15S thresholds: socStart 25, socStop 85, socCritical 12
   - Quiet hours 21:00–07:00, allowQuietOverride = false
   - Camera: /dev/video0, 720p @ 24fps, no Cloudflare input bound yet
 """
@@ -95,9 +95,12 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         # Periodic LCD wake-button presser. Opt-in: stays off until the
         # user calibrates the button servo and explicitly enables it
         # (either from the app or by setting enabled=true in Firestore).
-        # Interval matches the Predator's ~10 min display sleep timer.
+        # 240s (4 min) keeps the LCD continuously awake — the Predator's
+        # display sleeps after ~10 min idle, so 240s gives ~2.5x safety
+        # margin. The supervisor also pre-wakes the LCD at every tick
+        # before reading SoC, so this is now the secondary safety net.
         "enabled": False,
-        "intervalSec": 600,
+        "intervalSec": 240,
         "pressDurationSec": 0.15,
     },
     "engine": {
@@ -153,15 +156,17 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # Conservative default so the engine isn't bogged down before
             # we know what it can sustain.
             "currentAmps":      10.0,
-            # Pack voltage to stop charging (charge complete). 14S LiFePO4
-            # is ~48.0 V at 90 % SOC resting; under charge load voltage runs
-            # slightly higher than resting, so we set ~48.5 V to land near
-            # 90 % when the load is released. Tune empirically against LCD.
-            "voltageStop":      48.5,
+            # Pack voltage to stop charging (charge complete). 15S LiFePO4
+            # rests fully charged at ~52.8 V (3.52 V/cell, measured). Set
+            # voltageStop just below that so the under-charge-load voltage
+            # rise doesn't trip the BMS termination point. 52.5 V (3.50 V/cell)
+            # lands at ~95–98 % SOC when the load releases.
+            "voltageStop":      52.5,
             # Abort if pack voltage falls below this while loaded — means
             # the engine isn't generating enough. LiFePO4 BMS typically
-            # cuts ~2.5 V/cell = ~35 V; 42.5 V is well above that.
-            "voltageMinAbort":  42.5,
+            # cuts ~2.5 V/cell = ~37.5 V on a 15S pack; 46.0 V (3.07 V/cell,
+            # ~10 % SOC) is well above that with comfortable headroom.
+            "voltageMinAbort":  46.0,
             # Hard ceiling on charge duration. Code clamps to 2 hours.
             "maxDurationSec":   3600,    # 1 hour
             "refreshHz":        10,
@@ -195,14 +200,30 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         # by default; flip enabled=true to activate.
         "supervisor": {
             "enabled":              False,
-            # 14S LiFePO4 voltage targets (see src/lib/voltageSoc.ts for the
-            # full curve). 45.0 V ≈ 20 % SOC, 44.0 V ≈ 10 % SOC.
-            # The middle of the LiFePO4 curve is very flat (~46.0 V covers
-            # 30–70 % SOC), so thresholds should sit on the steeper lower
-            # end to avoid hysteresis-bouncing in the middle.
-            # Stop threshold lives in engine.charge.voltageStop.
-            "voltageStart":         45.0,   # below → auto-start in active window
-            "voltageCritical":      44.0,   # below → start even in quiet hours
+            # Primary decision signal: SoC % from Predator LCD (coulomb
+            # counted by the BMS — accurate under load, unlike voltage).
+            # Supervisor pre-wakes the LCD at every tick so battery_soc is
+            # fresh; voltage thresholds below are fallback when LCD asleep.
+            "socStart":             25,    # ≤ this → auto-start (active window)
+            "socCritical":          12,    # ≤ this → start even in quiet hours
+            "socStop":              85,    # ≥ this → auto-stop (with load guard)
+
+            # Load-aware proactive start (uses Predator BMS
+            # time_to_empty_minutes). Fires before SoC actually drops to
+            # socStart, but only if the pack is also at least somewhat
+            # depleted — prevents firing on a brief load spike at high SoC.
+            "runwayThresholdMin":   60,    # ≤ this min runway → consider proactive
+            "proactiveSocCeiling":  60,    # … but only when SoC ≤ this %
+
+            # Load-aware stop guard: don't auto-stop if BMS runway under
+            # the current load is short — we'd just restart immediately.
+            "sustainableRunwayMin": 180,   # only stop if runway ≥ this OR no load
+
+            # Voltage fallback (15S LiFePO4 curve in src/lib/voltageSoc.ts).
+            # Consulted only when battery_soc is null (LCD asleep + servo
+            # wake failed). Stop threshold lives in engine.charge.voltageStop.
+            "voltageStart":         48.0,
+            "voltageCritical":      46.5,
                                             # (if allowQuietOverride is true)
             "tickIntervalSec":      15,
             "actionCooldownSec":    60,

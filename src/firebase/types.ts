@@ -195,11 +195,70 @@ export interface ChargeConfig {
   enabled: boolean;
   preset: 'daytime_only' | 'eco' | 'quiet_off' | 'storm' | 'custom';
   windows: ChargeWindow[];
-  socStart: number;                // engine starts when SoC drops below this
-  socStop: number;                 // engine stops when SoC rises above this
-  socCritical: number;             // emergency floor for notifications
+  // socStart/socStop/socCritical are kept on the doc for legacy presets
+  // but the autonomous supervisor evaluates pack voltage from the VESC,
+  // not coulomb-counted SoC. The Schedule screen displays voltage from
+  // config/engine.supervisor + config/engine.charge instead — see
+  // EngineConfig below.
+  socStart: number;                // legacy — supervisor uses voltageStart
+  socStop: number;                 // legacy — supervisor uses voltageStop
+  socCritical: number;             // legacy — supervisor uses voltageCritical
   quietHours: { start: string; end: string };
   allowQuietOverride: boolean;     // if true, critical SoC overrides quiet hrs
+}
+
+// units/{unitId}/config/engine — start/crank/charge/stop/supervisor knobs.
+// Source of truth for the autonomous loop's voltage thresholds. The Pi
+// reads sub-blocks (engine.supervisor.voltageStart, engine.charge.voltageStop)
+// directly; the app needs to render them so users see the real values, not
+// the legacy SoC numbers on ChargeConfig.
+export interface EngineSupervisorConfig {
+  enabled: boolean;                // master gate (config/charge.enabled wins if true)
+
+  // Primary decision signal: Predator LCD coulomb-counted SoC (0–100 %).
+  // Supervisor pre-wakes the LCD every tick so battery_soc is fresh.
+  socStart: number;                // ≤ → auto-start in active window
+  socCritical: number;             // ≤ → auto-start even in quiet hrs
+  socStop: number;                 // ≥ → auto-stop (subject to load guard)
+
+  // Load-aware proactive start. Uses Predator BMS time_to_empty_minutes
+  // (runway). Fires before SoC hits socStart, but only if pack is at
+  // least somewhat depleted — prevents a brief load spike at high SoC
+  // from kicking the engine.
+  runwayThresholdMin: number;
+  proactiveSocCeiling: number;
+
+  // Load-aware stop guard. Don't auto-stop if the BMS runway under the
+  // current load is too short — we'd just restart immediately.
+  sustainableRunwayMin: number;
+
+  // Voltage fallback (consulted only when LCD is asleep AND battery_soc
+  // is null in the snapshot). Curve mirrors src/lib/voltageSoc.ts.
+  voltageStart: number;
+  voltageCritical: number;
+
+  tickIntervalSec: number;
+  actionCooldownSec: number;
+  respectQuietHours: boolean;
+}
+
+export interface EngineChargeConfig {
+  currentAmps: number;             // regen draw target (amps into pack)
+  voltageStop: number;             // pack volts; exit charge loop above this
+  voltageMinAbort: number;         // pack volts; engine not generating, abort
+  maxDurationSec: number;
+  refreshHz: number;
+  minRpmForLoad: number;
+  maxFetTempC: number;
+  maxMotorTempC: number;
+  rampUpSec: number;
+}
+
+export interface EngineConfig {
+  supervisor?: Partial<EngineSupervisorConfig>;
+  charge?: Partial<EngineChargeConfig>;
+  // start/crank/stop sub-blocks also live on this doc but the app doesn't
+  // surface them yet — they're tuning knobs for the bench-test workflow.
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -221,17 +280,62 @@ export interface SentryState {
   lastClipPath: string | null;     // Firebase Storage path of latest clip
 }
 
+// Live engine state at units/{u}/current/engine. The doc is written by
+// two sources that share it via Firestore merge=true:
+//   - Phase G state machine in pi/engine.py — owns `state`, `lastChangedAt`,
+//     and the per-state metadata (start/peak/end fields).
+//   - Phase C/G.5 scheduler (engine_supervisor) — owns `desired`, `reason`,
+//     `wouldRunAt`, `lastEvalAt`. Used by ScheduleScreen.
+// Consumers read whichever fields they care about and treat the other
+// group as optional. All fields are optional because the initial doc on
+// listener boot is just {state: 'idle', bootedAt: ...}.
+export type EngineMachineState =
+  | 'idle'
+  | 'starting'
+  | 'cranking'
+  | 'running'
+  | 'charging'
+  | 'stopping'
+  | 'failed_no_load'
+  | 'failed_did_not_catch'
+  | 'failed_timeout'
+  | 'failed_overtemp'
+  | 'failed_engine_bogged'
+  | 'failed_low_voltage'
+  | 'failed_error';
+
 export interface EngineState {
-  desired: 'run' | 'idle';
-  reason:
+  // ── Phase G state machine (engine.py) ─────────────────────────────────
+  state?: EngineMachineState;
+  lastChangedAt?: Timestamp;
+  startedAt?: Timestamp;
+  // Populated during cranking / starting / charging — the amps the loop
+  // is commanding the VESC to draw. Used by the dashboard's charge tile
+  // alongside the live motor_amps_in / motor_volts telemetry.
+  currentAmpsCommanded?: number;
+  voltageStop?: number;
+  maxDurationSec?: number;
+  phase?: string;                  // intra-state phase tag (e.g. 'spark_on')
+  error?: string;                  // populated on failed_error
+  // End-of-run metadata attached when the loop closes out. Engine.py
+  // writes these on the transition into running / failed_*.
+  peakCurrentAmps?: number;
+  durationSec?: number;
+  peakVoltage?: number;
+  finalVoltage?: number;
+  fetTempC?: number;
+  motorTempC?: number;
+  // ── Scheduler-set (engine_supervisor) ─────────────────────────────────
+  desired?: 'run' | 'idle';
+  reason?:
     | 'soc_low'                    // SoC under socStart inside an allowed window
     | 'soc_satisfied'              // SoC above socStop, stopping
     | 'window_closed'              // outside any charge window
     | 'quiet_hours'                // inside quiet hours and not overridden
     | 'disabled'                   // master switch off
     | 'manual_override';           // user-issued engine.override command
-  wouldRunAt: Timestamp | null;    // next time the scheduler expects to fire
-  lastEvalAt: Timestamp;
+  wouldRunAt?: Timestamp | null;   // next time the scheduler expects to fire
+  lastEvalAt?: Timestamp;
 }
 
 export interface CameraState {
