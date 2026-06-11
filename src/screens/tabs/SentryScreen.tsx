@@ -283,14 +283,19 @@ export function SentryScreen() {
 //   failed     — player has been mounted for the failure window without
 //                ever reaching readyToPlay. Show retry + stop.
 //
-// CONNECT_GRACE_MS: covers Cloudflare ingest warmup. ~8 s is comfortably
-//   above the typical 5–6 s; bumping higher just delays valid streams.
+// CONNECT_GRACE_MS: covers Cloudflare ingest warmup. Empirically the
+//   public manifest endpoint becomes available within ~2–4 s of the Pi
+//   spawning ffmpeg, so 3 s is enough — the iOS player can buffer through
+//   any remaining warmup once mounted. Bumping higher only delays valid
+//   streams without preventing a real failure mode.
 // PLAYBACK_FAIL_MS: how long after mount we tolerate the player not
-//   becoming ready before declaring failure. 15 s covers slow Starlink
-//   uplinks; below that we'd false-alarm on a fresh stream.
+//   reaching `readyToPlay` before declaring failure. iOS AVPlayer routinely
+//   takes 10–20 s to assemble enough HLS segments for a fresh live stream;
+//   30 s is the right ceiling. If the player emits an explicit `error`
+//   status we flip to `failed` immediately regardless of this timer.
 
-const CONNECT_GRACE_MS = 8000;
-const PLAYBACK_FAIL_MS = 15000;
+const CONNECT_GRACE_MS = 3000;
+const PLAYBACK_FAIL_MS = 30000;
 
 type StreamPhase = 'idle' | 'connecting' | 'playing' | 'failed';
 
@@ -347,6 +352,20 @@ function LiveStreamCard({
     };
   }, [streaming, hlsUrl]);
 
+  // Explicit play() on transition into `playing`. useVideoPlayer's setup
+  // callback only runs at player creation, so when the source flips from
+  // '' to the real URL the player auto-loads but does NOT auto-play —
+  // it sits in `loading` indefinitely. Driving play() from this effect
+  // makes the transition reliable regardless of the source-change timing.
+  useEffect(() => {
+    if (phase !== 'playing' || !livePlayer || !hlsUrl) return;
+    try {
+      livePlayer.play();
+    } catch (e) {
+      console.warn('[sentry] livePlayer.play() threw', e);
+    }
+  }, [phase, livePlayer, hlsUrl]);
+
   // Cancel the failure deadline as soon as the player is genuinely playable.
   useEffect(() => {
     if (!livePlayer) return;
@@ -357,6 +376,10 @@ function LiveStreamCard({
         failTimerRef.current = null;
       }
       if (event?.status === 'error') {
+        // Surface the player's error to the JS console so future
+        // debugging has something concrete; the user just sees the
+        // "STREAM UNAVAILABLE" panel.
+        console.warn('[sentry] expo-video error', event?.error);
         setPhase('failed');
       }
     });
@@ -377,7 +400,7 @@ function LiveStreamCard({
           <ActivityIndicator color={colors.textMuted} />
           <Text style={styles.streamPlaceholder}>CONNECTING…</Text>
           <Text style={styles.streamHint}>
-            WAITING FOR CLOUDFLARE TO INGEST THE STREAM (5–10 S)
+            WAITING FOR CLOUDFLARE TO INGEST THE STREAM
           </Text>
         </View>
         <Pressable onPress={onStop} style={styles.streamStopButton}>
