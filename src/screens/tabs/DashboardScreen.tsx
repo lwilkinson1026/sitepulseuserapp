@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
@@ -34,6 +34,23 @@ const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 // in Firestore, this is a build-time gate, not authorization — anyone with
 // a custom build of the app could flip it. It's strictly UX hygiene.
 const ADMIN_MODE = process.env.EXPO_PUBLIC_ADMIN_MODE === 'true';
+
+// How long the dashboard keeps showing the last Predator-LCD SoC reading
+// after `battery_soc` goes null in the snapshot. The Pi's I²C decoder
+// occasionally drops a frame even while the LCD is awake, and without
+// stickiness the displayed number flips to the voltage fallback (which
+// itself jitters under load) on every dropped frame. 20 s comfortably
+// covers normal frame gaps without delaying a real LCD-asleep handoff
+// to the voltage estimate by more than a few snapshot ticks.
+const LCD_STICKY_MS = 20_000;
+
+// EMA weight applied to the voltage-derived SoC each snapshot. The charge
+// loop modulates motor_amps_in between -10 A and 0 A every few seconds,
+// so the IR-compensated voltage estimate moves ±10–15 %/sample even though
+// the underlying pack state is barely changing. Lower α = heavier smoothing.
+// α = 0.15 + a ~2-5 s snapshot cadence ≈ a 30 s effective window — enough
+// to absorb the charge-loop ripple without lagging real changes for long.
+const VESC_SOC_EMA_ALPHA = 0.15;
 
 const STALENESS_LABEL: Record<string, string> = {
   fresh: 'LIVE',
@@ -234,15 +251,53 @@ export function DashboardScreen() {
 
   // SOC display priority: LCD reading first (accurate when fresh); fall
   // back to VESC-voltage-derived estimate so we always have *something*
-  // to show during the windows when the Predator LCD is asleep.
-  // Passing motor_amps_in lets the estimator subtract the IR voltage rise
-  // during regen (so charging doesn't inflate the SoC) and add it back
-  // during cranking (so the drop doesn't show a fake plunge).
-  const vescSoc = vescVoltsToSoc(snapshot.motor_volts, snapshot.motor_amps_in);
-  const usingVescFallback =
-    (snapshot.battery_soc === null || snapshot.battery_soc === undefined) &&
-    vescSoc !== null;
-  const socStr = usingVescFallback ? String(vescSoc) : fmt(snapshot.battery_soc, 0);
+  // to show when the Predator LCD is asleep. Passing motor_amps_in lets
+  // the estimator subtract the IR voltage rise during regen (so charging
+  // doesn't inflate the SoC) and add it back during cranking (so the
+  // drop doesn't show a fake plunge).
+  //
+  // Sticky LCD memory: keep showing the last non-null LCD value for
+  // LCD_STICKY_MS after battery_soc goes null in the snapshot. Without
+  // this, a single dropped I²C frame would swap the display from the
+  // LCD path to the voltage path (and back next snapshot), making the
+  // hero number look like it's cycling between several values.
+  const lcdMemRef = useRef<{ value: number; seenAt: number } | null>(null);
+  const live = snapshot.battery_soc;
+  if (typeof live === 'number' && Number.isFinite(live)) {
+    lcdMemRef.current = { value: live, seenAt: Date.now() };
+  }
+  const lcdMem = lcdMemRef.current;
+  const lcdFresh =
+    lcdMem !== null && Date.now() - lcdMem.seenAt < LCD_STICKY_MS;
+  const lcdSoc = lcdFresh ? lcdMem!.value : null;
+
+  // EMA-smoothed voltage SoC. Sampled from every snapshot regardless of
+  // whether it's currently displayed, so that when the LCD goes asleep
+  // mid-session the smoothed value already reflects recent samples
+  // instead of starting from cold.
+  const [smoothedVescSoc, setSmoothedVescSoc] = useState<number | null>(null);
+  useEffect(() => {
+    const sample = vescVoltsToSoc(
+      snapshot.motor_volts,
+      snapshot.motor_amps_in,
+    );
+    if (sample === null) return;
+    setSmoothedVescSoc((prev) =>
+      prev === null
+        ? sample
+        : Math.round(
+            VESC_SOC_EMA_ALPHA * sample + (1 - VESC_SOC_EMA_ALPHA) * prev,
+          ),
+    );
+  }, [snapshot.motor_volts, snapshot.motor_amps_in]);
+
+  const usingVescFallback = lcdSoc === null && smoothedVescSoc !== null;
+  const socStr =
+    lcdSoc !== null
+      ? fmt(lcdSoc, 0)
+      : usingVescFallback
+        ? String(smoothedVescSoc)
+        : '—';
   const stalenessKind =
     staleness === 'fresh' ? 'fresh' : staleness === 'stale' ? 'stale' : 'offline';
 
