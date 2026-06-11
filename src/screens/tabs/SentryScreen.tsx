@@ -11,6 +11,7 @@ import {
 import { Image as ExpoImage } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Eyebrow, FigCaption, Screen } from '../../components';
+import { HlsVideo } from '../../components/HlsVideo';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
 import { useOptimistic } from '../../hooks/useOptimistic';
 import { useUnitEvents, type EventEntry } from '../../hooks/useUnitEvents';
@@ -313,20 +314,15 @@ function LiveStreamCard({
   onStop: () => void;
 }) {
   const [phase, setPhase] = useState<StreamPhase>('idle');
+  const [retryNonce, setRetryNonce] = useState(0);
   const failTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // useVideoPlayer needs a stable source ref; pass empty string when we're
-  // not yet trying to play so the player stays unmounted-equivalent.
-  const shouldPlay = (phase === 'playing' || phase === 'failed') && !!hlsUrl;
-  const livePlayer = useVideoPlayer(shouldPlay ? hlsUrl! : '', (p) => {
-    p.loop = false;
-    p.muted = false;
-    if (shouldPlay) p.play();
-  });
-
   // Drive the phase state machine from the Pi-reported `streaming` flag.
   // When streaming flips false at any point, we collapse back to idle.
+  // `retryNonce` is included in the deps so RETRY re-runs the cycle
+  // without re-issuing the destructive stopStream/startStream pair that
+  // would kick every other viewer off the stream.
   useEffect(() => {
     if (!streaming || !hlsUrl) {
       if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
@@ -336,12 +332,11 @@ function LiveStreamCard({
       setPhase('idle');
       return;
     }
-    // streaming just became true (or component just mounted with it true).
     setPhase('connecting');
     graceTimerRef.current = setTimeout(() => {
       setPhase('playing');
-      // Once we mount the player, start a failure deadline. If the player
-      // signals readyToPlay before then, the listener below clears it.
+      // Once HlsVideo mounts, start a failure deadline. HlsVideo's onReady
+      // clears it; onError trips to failed immediately.
       failTimerRef.current = setTimeout(() => {
         setPhase('failed');
       }, PLAYBACK_FAIL_MS);
@@ -350,47 +345,27 @@ function LiveStreamCard({
       if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
       if (failTimerRef.current) clearTimeout(failTimerRef.current);
     };
-  }, [streaming, hlsUrl]);
+  }, [streaming, hlsUrl, retryNonce]);
 
-  // Explicit play() on transition into `playing`. useVideoPlayer's setup
-  // callback only runs at player creation, so when the source flips from
-  // '' to the real URL the player auto-loads but does NOT auto-play —
-  // it sits in `loading` indefinitely. Driving play() from this effect
-  // makes the transition reliable regardless of the source-change timing.
-  useEffect(() => {
-    if (phase !== 'playing' || !livePlayer || !hlsUrl) return;
-    try {
-      livePlayer.play();
-    } catch (e) {
-      console.warn('[sentry] livePlayer.play() threw', e);
+  const handlePlayerReady = () => {
+    if (failTimerRef.current) {
+      clearTimeout(failTimerRef.current);
+      failTimerRef.current = null;
     }
-  }, [phase, livePlayer, hlsUrl]);
+  };
 
-  // Cancel the failure deadline as soon as the player is genuinely playable.
-  useEffect(() => {
-    if (!livePlayer) return;
-    const sub = livePlayer.addListener('statusChange', (event) => {
-      // expo-video's StatusChangeEventPayload has the new status under `status`.
-      if (event?.status === 'readyToPlay' && failTimerRef.current) {
-        clearTimeout(failTimerRef.current);
-        failTimerRef.current = null;
-      }
-      if (event?.status === 'error') {
-        // Surface the player's error to the JS console so future
-        // debugging has something concrete; the user just sees the
-        // "STREAM UNAVAILABLE" panel.
-        console.warn('[sentry] expo-video error', event?.error);
-        setPhase('failed');
-      }
-    });
-    return () => sub.remove();
-  }, [livePlayer]);
+  const handlePlayerError = (err: unknown) => {
+    console.warn('[sentry] HlsVideo error', err);
+    setPhase('failed');
+  };
 
+  // RETRY just remounts the local player and re-arms the deadline. We
+  // do NOT issue stopStream/startStream here — that would tear down the
+  // Pi's ffmpeg and drop every other viewer. If the Pi side is genuinely
+  // dead, the `streaming` flag flips false and the effect above will
+  // collapse us back to idle.
   const handleRetry = () => {
-    // Tear down the stream on the Pi, then re-issue start after a beat
-    // so the ffmpeg process has time to release the camera.
-    onStop();
-    setTimeout(onGoLive, 1500);
+    setRetryNonce((n) => n + 1);
   };
 
   if (phase === 'connecting') {
@@ -410,15 +385,14 @@ function LiveStreamCard({
     );
   }
 
-  if (phase === 'playing') {
+  if (phase === 'playing' && hlsUrl) {
     return (
       <View style={styles.streamCard}>
-        <VideoView
-          player={livePlayer}
+        <HlsVideo
+          url={hlsUrl}
           style={styles.video}
-          allowsFullscreen
-          allowsPictureInPicture
-          nativeControls
+          onReady={handlePlayerReady}
+          onError={handlePlayerError}
         />
         <Pressable onPress={onStop} style={styles.streamStopButton}>
           <Text style={styles.streamStopButtonLabel}>STOP STREAM</Text>
@@ -432,9 +406,9 @@ function LiveStreamCard({
       <View style={styles.streamCard}>
         <Text style={styles.streamPlaceholder}>STREAM UNAVAILABLE</Text>
         <Text style={styles.streamHint}>
-          PI REPORTS LIVE BUT THE PLAYBACK URL ISN’T RESPONDING. CHECK THAT
-          THE CLOUDFLARE ENV IS SET ON THE PI AND THAT FFMPEG IS REACHING
-          CLOUDFLARE.
+          PLAYER COULDN’T REACH THE STREAM WITHIN 30S. TAP RETRY. IF IT KEEPS
+          FAILING, CHECK THE PI — FFMPEG MAY HAVE STOPPED OR THE CLOUDFLARE
+          INGEST IS DOWN.
         </Text>
         <View style={styles.streamFailedActions}>
           <Pressable onPress={handleRetry} style={styles.streamButton}>
