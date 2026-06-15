@@ -118,6 +118,8 @@ export type CommandKind =
   | 'engine.start'
   // Regen charging + graceful shutdown (phase G.4)
   | 'engine.charge'
+  // Live tune of an already-running charge loop (phase G.4.1)
+  | 'engine.charge.tune'
   | 'engine.stop';
 
 export type CommandStatus = 'pending' | 'ack' | 'failed';

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
@@ -11,6 +11,7 @@ import {
   startEngine,
   stopEngine,
   toggleAc,
+  tuneCharge,
   wakeLcd,
 } from '../../firebase/commands';
 import { confirm } from '../../lib/confirm';
@@ -52,6 +53,14 @@ const LCD_STICKY_MS = 20_000;
 // to absorb the charge-loop ripple without lagging real changes for long.
 const VESC_SOC_EMA_ALPHA = 0.15;
 
+// Charge-tune stepper bounds. Hard ceiling on the Pi is 50 A; we cap the
+// app side a hair below so the user never lands exactly on the clamp and
+// gets a silently-rejected request. Any step that would land above
+// CHARGE_TUNE_WARN_AMPS prompts confirm() before sending.
+const CHARGE_TUNE_MIN_AMPS  = 0;
+const CHARGE_TUNE_MAX_AMPS  = 45;
+const CHARGE_TUNE_WARN_AMPS = 25;
+
 const STALENESS_LABEL: Record<string, string> = {
   fresh: 'LIVE',
   stale: 'STALE',
@@ -62,6 +71,31 @@ const STALENESS_LABEL: Record<string, string> = {
 function fmt(value: number | undefined | null, digits = 1): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—';
   return value.toFixed(digits);
+}
+
+function TuneButton({
+  label,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Charge target ${label} amps`}
+      style={({ pressed }) => [
+        styles.tuneButton,
+        pressed && !disabled ? styles.tuneButtonPressed : null,
+        disabled ? styles.tuneButtonDisabled : null,
+      ]}
+    >
+      <Text style={styles.tuneButtonLabel}>{label}</Text>
+    </Pressable>
+  );
 }
 
 export function DashboardScreen() {
@@ -202,6 +236,43 @@ export function DashboardScreen() {
     } finally {
       // Stop sequence includes up to 15s RPM-wait — lock out longer.
       setTimeout(() => setStopBusy(false), 18000);
+    }
+  };
+
+  // Charge tune stepper. Disabled briefly after each press so the round-trip
+  // can land before the next tap. Confirmation required when crossing the
+  // warn threshold upward — both as a guard against fat-finger taps and to
+  // make the operator pause before loading the engine hard.
+  const [tuneBusy, setTuneBusy] = useState(false);
+  const onTunePress = async (delta: number) => {
+    if (!user || tuneBusy) return;
+    const current = Math.round(engineState.data?.currentAmpsCommanded ?? 0);
+    let next = current + delta;
+    if (next < CHARGE_TUNE_MIN_AMPS) next = CHARGE_TUNE_MIN_AMPS;
+    if (next > CHARGE_TUNE_MAX_AMPS) next = CHARGE_TUNE_MAX_AMPS;
+    if (next === current) return;
+
+    if (delta > 0 && next > CHARGE_TUNE_WARN_AMPS && current <= CHARGE_TUNE_WARN_AMPS) {
+      const ok = await confirm({
+        title: `Raise to ${next} A?`,
+        message:
+          `You're about to take the regen load above ${CHARGE_TUNE_WARN_AMPS} A. ` +
+          `The engine may bog down or stall under sustained high load. ` +
+          `The VESC will still slew at 10 A/s, but listen for the engine ` +
+          `before adding more.`,
+        confirmLabel: `Set ${next} A`,
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+
+    setTuneBusy(true);
+    try {
+      await tuneCharge(DEV_UNIT_ID, user.uid, next);
+    } catch (e) {
+      console.warn('[dashboard] tuneCharge failed', e);
+    } finally {
+      setTimeout(() => setTuneBusy(false), 300);
     }
   };
 
@@ -372,8 +443,28 @@ export function DashboardScreen() {
               <Text style={styles.metricUnit}>A</Text>
             </View>
             <Text style={styles.metricSub}>
-              {fmt(chargeWatts, 0)} W into pack
+              {fmt(chargeWatts, 0)} W into pack  ·  {fmt(snapshot.motor_volts, 1)} V
+              {snapshot.motor_fet_temp_c !== undefined
+                ? `  ·  FET ${fmt(snapshot.motor_fet_temp_c, 0)} °C`
+                : ''}
             </Text>
+
+            {ADMIN_MODE && (
+              <View style={styles.tuneBlock}>
+                <Text style={styles.tuneLabel}>
+                  TARGET  ·  {Math.round(engineState.data?.currentAmpsCommanded ?? 0)} A
+                </Text>
+                <View style={styles.tuneRow}>
+                  <TuneButton label="-5" onPress={() => onTunePress(-5)} disabled={tuneBusy || !user} />
+                  <TuneButton label="-1" onPress={() => onTunePress(-1)} disabled={tuneBusy || !user} />
+                  <TuneButton label="+1" onPress={() => onTunePress(+1)} disabled={tuneBusy || !user} />
+                  <TuneButton label="+5" onPress={() => onTunePress(+5)} disabled={tuneBusy || !user} />
+                </View>
+                <Text style={styles.tuneHint}>
+                  Slewed on the VESC at 10 A/s · max {CHARGE_TUNE_MAX_AMPS} A
+                </Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -562,5 +653,45 @@ const styles = StyleSheet.create({
     borderTopColor: colors.borderHairline,
     paddingTop: spacing.lg,
     gap: spacing.sm,
+  },
+  tuneBlock: {
+    marginTop: spacing.sm,
+    gap: spacing.xs,
+  },
+  tuneLabel: {
+    color: colors.textBody,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoSM,
+    letterSpacing: tracking.monoCaps,
+  },
+  tuneRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  tuneButton: {
+    flex: 1,
+    borderWidth: hairline,
+    borderColor: colors.textDisplay,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tuneButtonPressed: {
+    opacity: 0.65,
+  },
+  tuneButtonDisabled: {
+    opacity: 0.35,
+  },
+  tuneButtonLabel: {
+    color: colors.textDisplay,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoLG,
+    letterSpacing: tracking.monoCaps,
+  },
+  tuneHint: {
+    color: colors.textMuted,
+    fontFamily: fonts.mono,
+    fontSize: typeScale.monoSM,
+    letterSpacing: tracking.monoCaps,
   },
 });
