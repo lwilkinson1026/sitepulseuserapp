@@ -120,6 +120,15 @@ _charge_thread: Optional[threading.Thread] = None
 _charge_abort  = threading.Event()   # set to request the charge loop exit
 _charge_active = threading.Event()   # set while charge thread is running
 
+# Live-tune state. The charge loop reads `_charge_target_amps` every send tick
+# instead of using a value captured at start, so engine.charge.tune commands
+# can adjust the target while the loop is running. Slewed toward via
+# MAX_SLEW_AMPS_PER_SEC so a 5A→30A jump can't whip the motor in one tick.
+_charge_target_lock        = threading.Lock()
+_charge_target_amps: Optional[float] = None    # live target (None when not charging)
+_charge_applied_amps        = 0.0              # what the loop is currently sending
+MAX_SLEW_AMPS_PER_SEC      = 10.0              # hard ramp rate, both directions
+
 
 # Defaults for the start macro. Mirror seed_config.py's `engine.start` block.
 DEFAULT_START_CONFIG: Dict[str, Any] = {
@@ -640,8 +649,9 @@ def _run_charge_loop(
     unit_id: str,
     params: Dict[str, Any],
 ) -> None:
-    """Long-running charge loop. Sends SET_CURRENT(-currentAmps) at
-    refresh_hz, reads STATUS frames inline, exits on any of:
+    """Long-running charge loop. Sends SET_CURRENT(-applied_amps) at
+    refresh_hz, slewing applied_amps toward the live shared target each
+    send tick. Reads STATUS frames inline, exits on any of:
       - voltage rises above voltage_stop  → state="idle" (success)
       - voltage falls below voltage_min_abort → state="failed_low_voltage"
       - RPM falls below min_rpm_for_load   → state="failed_engine_bogged"
@@ -649,7 +659,8 @@ def _run_charge_loop(
       - max_duration_sec exceeded          → state="failed_timeout"
       - _charge_abort signaled (engine.stop) → state="stopped"
     """
-    target_amps     = params["current_amps"]
+    global _charge_target_amps, _charge_applied_amps
+
     voltage_stop    = params["voltage_stop"]
     voltage_min     = params["voltage_min_abort"]
     max_dur         = params["max_duration_sec"]
@@ -657,9 +668,18 @@ def _run_charge_loop(
     min_rpm         = params["min_rpm_for_load"]
     max_fet_temp    = params["max_fet_temp_c"]
     max_motor_temp  = params["max_motor_temp_c"]
-    ramp_up_sec     = params["ramp_up_sec"]
+    # ramp_up_sec is kept on the config doc for backwards compatibility, but
+    # it now only gates the post-ramp safety checks (low_volts/min_rpm) —
+    # the actual ramp is handled by the MAX_SLEW_AMPS_PER_SEC slew limiter
+    # below, which works for both the initial 0→target ramp and any mid-run
+    # engine.charge.tune adjustments.
+    settle_sec      = params["ramp_up_sec"]
 
     refresh_interval = 1.0 / refresh_hz
+
+    with _charge_target_lock:
+        _charge_target_amps  = params["current_amps"]
+        _charge_applied_amps = 0.0
 
     sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
     try:
@@ -683,7 +703,7 @@ def _run_charge_loop(
 
         _publish_state(db, unit_id, "charging", {
             "startedAt":            firestore.SERVER_TIMESTAMP,
-            "currentAmpsCommanded": target_amps,
+            "currentAmpsCommanded": params["current_amps"],
             "voltageStop":          voltage_stop,
             "maxDurationSec":       max_dur,
         })
@@ -697,15 +717,23 @@ def _run_charge_loop(
                 result_metadata = {"durationSec": round(elapsed, 1)}
                 break
 
-            # Ramp the commanded amps up over ramp_up_sec so the engine
-            # doesn't take a sudden full-regen hit.
+            # Send tick: slew applied_amps toward the live shared target by
+            # at most MAX_SLEW_AMPS_PER_SEC * refresh_interval per step.
             if now - last_send_at >= refresh_interval:
-                if ramp_up_sec > 0 and elapsed < ramp_up_sec:
-                    ramp_fraction = elapsed / ramp_up_sec
+                dt = max(refresh_interval, now - last_send_at) if last_send_at > 0 else refresh_interval
+                with _charge_target_lock:
+                    target_now = _charge_target_amps or 0.0
+                target_now = max(0.0, min(MAX_CHARGE_AMPS_HARD, target_now))
+
+                max_delta = MAX_SLEW_AMPS_PER_SEC * dt
+                if abs(target_now - _charge_applied_amps) <= max_delta:
+                    _charge_applied_amps = target_now
                 else:
-                    ramp_fraction = 1.0
+                    _charge_applied_amps += (
+                        max_delta if target_now > _charge_applied_amps else -max_delta
+                    )
                 # Negative SET_CURRENT = regen / generator mode = charge pack.
-                sender.set_current(-target_amps * ramp_fraction)
+                sender.set_current(-_charge_applied_amps)
                 last_send_at = now
 
             msg = bus.recv(timeout=0.01)
@@ -725,8 +753,11 @@ def _run_charge_loop(
                 if last_volts > peak_volts:
                     peak_volts = last_volts
 
-            # Safety checks only meaningful past the ramp-up window.
-            if elapsed <= ramp_up_sec:
+            # Safety checks only meaningful past the initial settle window.
+            # Voltage sag and RPM dip are expected during the 0→target slew,
+            # so we don't act on them until the load has had a moment to
+            # stabilize. Re-arm window only on initial start, not on each tune.
+            if elapsed <= settle_sec:
                 continue
 
             if last_volts is not None and last_volts >= voltage_stop:
@@ -811,6 +842,9 @@ def _run_charge_loop(
             sender.close()
         except Exception:
             pass
+        with _charge_target_lock:
+            _charge_target_amps  = None
+            _charge_applied_amps = 0.0
         _charge_active.clear()
 
 
@@ -856,6 +890,50 @@ def handle_engine_charge(
         )
     finally:
         _engine_lock.release()
+
+
+def handle_engine_charge_tune(
+    db: firestore.Client,
+    unit_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Adjust the live charge target while the loop is running.
+
+    The charge thread reads `_charge_target_amps` every send tick and slews
+    `_charge_applied_amps` toward it at MAX_SLEW_AMPS_PER_SEC. So calling
+    this handler at any cadence is safe — the slew limiter does the rate
+    limiting at the hardware-command level.
+
+    payload:
+      currentAmps — the new target (amps drawn from the motor, positive).
+                    Clamped to [0, MAX_CHARGE_AMPS_HARD].
+
+    Raises if no charge loop is active. Does NOT take _engine_lock — the
+    charge loop doesn't hold it either, and we want tune commands to land
+    even while the lock is briefly held by another caller.
+    """
+    global _charge_target_amps
+
+    if not _charge_active.is_set():
+        raise RuntimeError("engine.charge.tune: no charge loop active")
+
+    raw = payload.get("currentAmps", payload.get("currentAmpsOverride"))
+    if raw is None:
+        raise ValueError("engine.charge.tune: missing currentAmps")
+    new_target = max(0.0, min(MAX_CHARGE_AMPS_HARD, float(raw)))
+
+    with _charge_target_lock:
+        prev = _charge_target_amps
+        _charge_target_amps = new_target
+
+    _publish_state(db, unit_id, "charging", {
+        "currentAmpsCommanded": new_target,
+    })
+    print(
+        f"[engine] charge target tuned: {prev}A → {new_target}A "
+        f"(slew {MAX_SLEW_AMPS_PER_SEC}A/s)",
+        flush=True,
+    )
 
 
 # ─── stop primitive (phase G.4) ────────────────────────────────────────────

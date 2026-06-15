@@ -175,6 +175,15 @@ export function chargeEngine(
   return issueCommand(unitId, uid, 'engine.charge', payload);
 }
 
+// Live-tune the active charge loop. Only valid while engine state is
+// 'charging' — the Pi rejects this if no charge thread is running. The
+// VESC-side slew limiter (10 A/s) handles rate-limiting at the hardware
+// level, so callers can write freely; each new value supersedes the
+// previous target.
+export function tuneCharge(unitId: string, uid: string, currentAmps: number) {
+  return issueCommand(unitId, uid, 'engine.charge.tune', { currentAmps });
+}
+
 // Graceful shutdown: aborts any active charge loop, opens the spark relay,
 // waits for RPM to fall under idle threshold.
 export function stopEngine(unitId: string, uid: string) {
