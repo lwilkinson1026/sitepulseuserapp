@@ -252,6 +252,15 @@ def _publish_state(
     except Exception as e:
         print(f"[engine] failed to publish state {state!r}: {e}", flush=True)
 
+    # Drive any engine-follow aux relay (e.g. cooling fans on a channel set to
+    # 'auto') to match. Lazy import keeps engine.py importable off-Pi; the
+    # reconcile is best-effort so a GPIO hiccup never blocks state publishing.
+    try:
+        from relays import reconcile_engine_follow
+        reconcile_engine_follow(db, unit_id, state)
+    except Exception as e:
+        print(f"[engine] aux-follow reconcile skipped: {e}", flush=True)
+
 
 def init_engine(db: firestore.Client, unit_id: str) -> None:
     """Publish 'idle' on listener startup so the app sees a clean state.

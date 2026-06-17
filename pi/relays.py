@@ -74,6 +74,12 @@ _initialized = False
 _relay_logical: Dict[int, bool] = {1: False, 2: False, 3: False}
 _override_active = False
 
+# Engine states (current/engine.state) in which the engine is physically
+# turning. Non-light aux channels in 'auto' mode are energized while the
+# engine is in one of these states. 'charging' is included because the
+# engine is still running during the regen/charge phase.
+ENGINE_RUNNING_STATES = ("running", "charging")
+
 
 def _on_value(on: bool) -> int:
     g = _gpio()
@@ -153,6 +159,55 @@ def _mirror_relays(db: firestore.Client, unit_id: str, source: str) -> None:
     }, merge=True)
 
 
+# ─── engine-follow (auto aux channels) ─────────────────────────────────────
+
+def _engine_is_running(db: firestore.Client, unit_id: str) -> bool:
+    try:
+        snap = db.document(f"units/{unit_id}/current/engine").get()
+        if snap.exists:
+            return snap.get("state") in ENGINE_RUNNING_STATES
+    except Exception:
+        pass
+    return False
+
+
+def reconcile_engine_follow(
+    db: firestore.Client,
+    unit_id: str,
+    engine_state: Optional[str] = None,
+) -> None:
+    """Drive every non-light aux channel whose mode is 'auto' to match whether
+    the engine is running. Called on each engine state transition (from
+    engine.py's _publish_state) and when a channel is switched into 'auto'.
+
+    `engine_state` is the freshly-published state when the caller already has
+    it; otherwise we read current/engine ourselves.
+    """
+    _ensure_initialized()
+    running = (
+        engine_state in ENGINE_RUNNING_STATES
+        if engine_state is not None
+        else _engine_is_running(db, unit_id)
+    )
+    light_ch = _light_channel(db, unit_id)
+    try:
+        snap = db.document(f"units/{unit_id}/config/relays").get()
+        channels = (snap.to_dict() or {}).get("channels", {}) if snap.exists else {}
+    except Exception:
+        channels = {}
+
+    changed = False
+    with _state_lock:
+        for ch in RELAY_PINS:
+            if ch == light_ch:
+                continue
+            if channels.get(str(ch), {}).get("mode") == "auto" and _relay_logical[ch] != running:
+                _drive(ch, running)
+                changed = True
+        if changed:
+            _mirror_relays(db, unit_id, "engine")
+
+
 # ─── command handlers ──────────────────────────────────────────────────────
 
 def handle_light_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]) -> None:
@@ -213,6 +268,14 @@ def handle_relay_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]
         raise ValueError(f"relay.set: invalid mode {mode!r}")
 
     light_ch = _light_channel(db, unit_id)
+    # For a non-light channel switched into 'auto' (engine-follow), seed its
+    # state from the current engine state right now — read before taking the
+    # lock so we don't do Firestore I/O while holding it.
+    engine_running = (
+        _engine_is_running(db, unit_id)
+        if (mode == "auto" and channel != light_ch)
+        else False
+    )
 
     with _state_lock:
         if channel == light_ch and _override_active and mode != "on":
@@ -221,6 +284,9 @@ def handle_relay_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]
             pass
         elif mode == "on":
             _drive(channel, True)
+        elif mode == "auto" and channel != light_ch:
+            # Engine-follow: energized only while the engine is running.
+            _drive(channel, engine_running)
         else:
             _drive(channel, False)
 

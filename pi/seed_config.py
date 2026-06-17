@@ -35,7 +35,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "channels": {
             "1": {"label": "Security Light",   "mode": "auto"},
             "2": {"label": "Aux 2",            "mode": "off"},
-            "3": {"label": "User Aux Output",  "mode": "off"},
+            # Channel 3 follows the engine by default: 'auto' energizes it
+            # whenever the engine is running/charging (e.g. cooling fans).
+            "3": {"label": "User Aux Output",  "mode": "auto"},
         },
     },
     "light": {

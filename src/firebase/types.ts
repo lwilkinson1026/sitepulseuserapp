@@ -144,7 +144,9 @@ export interface CommandDoc {
 // "security light" — its mode is mirrored in config/light below.
 export interface RelayChannelConfig {
   label: string;                   // user-facing label (e.g. "Security Light")
-  mode: 'off' | 'on' | 'auto';     // auto = sentry-controlled (channel 1 only)
+  // auto = automatic control: sentry-driven on the light channel; engine-follow
+  // (energized while the engine is running/charging) on aux channels.
+  mode: 'off' | 'on' | 'auto';
 }
 
 export interface RelaysConfig {
@@ -256,11 +258,18 @@ export interface EngineChargeConfig {
   rampUpSec: number;
 }
 
+export interface EngineStartConfig {
+  sparkRelayChannel: number;       // Waveshare channel that drives the spark
+}
+
 export interface EngineConfig {
   supervisor?: Partial<EngineSupervisorConfig>;
   charge?: Partial<EngineChargeConfig>;
-  // start/crank/stop sub-blocks also live on this doc but the app doesn't
-  // surface them yet — they're tuning knobs for the bench-test workflow.
+  // The app reads start.sparkRelayChannel so the Outlets screen can hide the
+  // engine-follow 'auto' mode on the spark channel (it's engine-managed).
+  start?: Partial<EngineStartConfig>;
+  // crank/stop sub-blocks also live on this doc but the app doesn't surface
+  // them yet — they're tuning knobs for the bench-test workflow.
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -274,6 +283,15 @@ export interface LightState {
   physicalOverride: boolean;       // SPST hardware switch is forcing on
   lastChangedAt: Timestamp;
   lastChangedBy: 'app' | 'sentry' | 'physical' | 'system';
+}
+
+// units/{unitId}/current/relays — live physical state of all three relay
+// channels, mirrored by the Pi. Used to show the real energized state for
+// channels in 'auto' mode, where config mode alone doesn't reflect reality.
+export interface RelaysState {
+  channels: Record<'1' | '2' | '3', { state: boolean }>;
+  lastChangedAt: Timestamp;
+  lastChangedBy: 'app' | 'physical' | 'sentry' | 'engine';
 }
 
 export interface SentryState {

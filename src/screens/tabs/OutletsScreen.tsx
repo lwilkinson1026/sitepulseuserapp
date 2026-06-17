@@ -13,9 +13,11 @@ import { useOptimistic } from '../../hooks/useOptimistic';
 import { useAuth } from '../../hooks/AuthContext';
 import { setLight, setRelay } from '../../firebase/commands';
 import type {
+  EngineConfig,
   LightConfig,
   LightState,
   RelaysConfig,
+  RelaysState,
 } from '../../firebase/types';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
@@ -31,7 +33,10 @@ const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 
 type LightMode = 'off' | 'on' | 'auto';
 const LIGHT_MODES: LightMode[] = ['off', 'on', 'auto'];
-const RELAY_MODES: Array<'off' | 'on'> = ['off', 'on'];
+// Aux channels get the full off/on/auto selector, except the spark channel
+// (engine-managed), which is plain off/on — see auxModesFor below.
+const RELAY_MODES: LightMode[] = ['off', 'on', 'auto'];
+const RELAY_MODES_NO_AUTO: LightMode[] = ['off', 'on'];
 
 export function OutletsScreen() {
   const { user } = useAuth();
@@ -39,14 +44,21 @@ export function OutletsScreen() {
   const lightConfig = useUnitDoc<LightConfig>(DEV_UNIT_ID, 'config', 'light');
   const relaysConfig = useUnitDoc<RelaysConfig>(DEV_UNIT_ID, 'config', 'relays');
   const lightState = useUnitDoc<LightState>(DEV_UNIT_ID, 'current', 'light');
+  const relaysState = useUnitDoc<RelaysState>(DEV_UNIT_ID, 'current', 'relays');
+  const engineConfig = useUnitDoc<EngineConfig>(DEV_UNIT_ID, 'config', 'engine');
 
   // Derived values come before any conditional return so hook order stays
   // stable across renders (React's rules-of-hooks).
   const lightChannel = (lightConfig.data?.relayChannel ?? 1) as 1 | 2 | 3;
+  const sparkChannel = (engineConfig.data?.start?.sparkRelayChannel ?? 2) as 1 | 2 | 3;
   const auxChannels = useMemo(
     () => ([1, 2, 3] as Array<1 | 2 | 3>).filter((c) => c !== lightChannel),
     [lightChannel],
   );
+  // Spark channel is driven by the engine sequence, so engine-follow 'auto'
+  // would be meaningless there — offer it only on the other aux channel(s).
+  const auxModesFor = (channel: 1 | 2 | 3): LightMode[] =>
+    channel === sparkChannel ? RELAY_MODES_NO_AUTO : RELAY_MODES;
 
   // One optimistic value per relay channel. We pre-allocate all three hooks
   // unconditionally (rules-of-hooks: never call hooks in a loop or branch),
@@ -91,7 +103,7 @@ export function OutletsScreen() {
     void setLight(DEV_UNIT_ID, user.uid, mode);
   };
 
-  const onRelayMode = (channel: 1 | 2 | 3, mode: 'off' | 'on') => {
+  const onRelayMode = (channel: 1 | 2 | 3, mode: LightMode) => {
     setChannelMode[String(channel) as '1' | '2' | '3'](mode);
     void setRelay(DEV_UNIT_ID, user.uid, channel, mode);
   };
@@ -177,7 +189,15 @@ export function OutletsScreen() {
           const channelKey = String(channel) as '1' | '2' | '3';
           const cfg = relaysConfig.data?.channels[channelKey];
           // Optimistic mode wins; truth restores when the Pi mirrors back.
-          const mode = (channelModes[channelKey] as 'off' | 'on');
+          const mode = channelModes[channelKey];
+          // In 'auto' the relay is engine-driven, so the live mirror is the
+          // only source of truth for whether it's actually energized.
+          const liveOn = relaysState.data?.channels?.[channelKey]?.state ?? false;
+          const energized = mode === 'auto' ? liveOn : mode === 'on';
+          const statusText =
+            mode === 'auto'
+              ? `AUTO · ${energized ? 'ENGINE RUNNING' : 'IDLE'}`
+              : energized ? 'ENERGIZED' : 'OFF';
           return (
             <View key={channel} style={styles.card}>
               <View style={styles.cardHeaderRow}>
@@ -186,19 +206,19 @@ export function OutletsScreen() {
                     {cfg?.label ?? `Channel ${channel}`}
                   </Text>
                   <Text style={styles.cardSubLabel}>
-                    CH {String(channel).padStart(2, '0')}  ·  {mode === 'on' ? 'ENERGIZED' : 'OFF'}
+                    CH {String(channel).padStart(2, '0')}  ·  {statusText}
                   </Text>
                 </View>
                 <View
                   style={[
                     styles.indicator,
-                    mode === 'on' ? styles.indicatorOn : null,
+                    energized ? styles.indicatorOn : null,
                   ]}
                 />
               </View>
 
               <View style={styles.segmentGroup}>
-                {RELAY_MODES.map((m) => {
+                {auxModesFor(channel).map((m) => {
                   const active = mode === m;
                   return (
                     <Pressable
