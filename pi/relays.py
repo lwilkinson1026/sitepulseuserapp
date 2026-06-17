@@ -44,6 +44,20 @@ RELAY_PINS: Dict[int, int] = {
 OVERRIDE_PIN = int(os.environ.get("SITEPULSE_OVERRIDE_PIN", "17"))
 RELAY_ACTIVE_LOW = os.environ.get("SITEPULSE_RELAY_ACTIVE_LOW", "1") == "1"
 
+# ─── TEMPORARY per-channel polarity invert (2026-06-17) ─────────────────────
+# Channel 3's cooling fans are still wired to the relay's NC contact (not yet
+# moved to NO). With normal polarity, logical "on" (engine running) energizes
+# the relay → NC opens → fans cut out *while the engine is hot*. That's
+# backwards and dangerous during testing. Inverting ch3 here flips its
+# physical drive only: logical "on" de-energizes the relay → NC stays closed
+# → fans run; logical "off" energizes → fans off. Channels 1 (light) and 2
+# (spark) are unaffected and keep the board-wide active-low behavior.
+#
+# REMOVE this (set SITEPULSE_RELAY_INVERT="") once the fans are rewired to the
+# NO contact. Override the inverted-channel set via the env var if needed.
+_INVERT_ENV = os.environ.get("SITEPULSE_RELAY_INVERT", "3")
+RELAY_INVERT = {int(c) for c in _INVERT_ENV.split(",") if c.strip().isdigit()}
+
 
 # ─── lazy GPIO import ───────────────────────────────────────────────────────
 # Lets this module import on a Mac for typing / dry-run tests. Handlers
@@ -81,9 +95,14 @@ _override_active = False
 ENGINE_RUNNING_STATES = ("running", "charging")
 
 
-def _on_value(on: bool) -> int:
+def _on_value(on: bool, channel: Optional[int] = None) -> int:
     g = _gpio()
-    if RELAY_ACTIVE_LOW:
+    active_low = RELAY_ACTIVE_LOW
+    if channel in RELAY_INVERT:
+        # Flip the electrical polarity for this channel only (see
+        # RELAY_INVERT note above). Logical state is unchanged.
+        active_low = not active_low
+    if active_low:
         return g.LOW if on else g.HIGH
     return g.HIGH if on else g.LOW
 
@@ -96,21 +115,23 @@ def _ensure_initialized() -> None:
         g = _gpio()
         g.setmode(g.BCM)
         g.setwarnings(False)
-        for pin in RELAY_PINS.values():
+        for ch, pin in RELAY_PINS.items():
             # initial= sidesteps rpi-lgpio's read-before-claim bug on Pi 5
             # ("GPIO not allocated" when setup() tries to sample current state
-            # before the pin is claimed as output). Setting an explicit initial
-            # value skips that read entirely. We start HIGH which is "off" for
-            # an active-low board.
-            g.setup(pin, g.OUT, initial=g.HIGH)
-            g.output(pin, _on_value(False))
+            # before the pin is claimed as output). Any explicit initial value
+            # skips that read entirely. Use the channel's logical-"off" level
+            # so inverted channels (RELAY_INVERT) come up de-energized-correct
+            # rather than blipping the wrong way during boot.
+            off_val = _on_value(False, ch)
+            g.setup(pin, g.OUT, initial=off_val)
+            g.output(pin, off_val)
         g.setup(OVERRIDE_PIN, g.IN, pull_up_down=g.PUD_UP)
         _initialized = True
 
 
 def _drive(channel: int, on: bool) -> None:
     """Low-level: write the GPIO and update the logical mirror. Caller holds _state_lock."""
-    _gpio().output(RELAY_PINS[channel], _on_value(on))
+    _gpio().output(RELAY_PINS[channel], _on_value(on, channel))
     _relay_logical[channel] = on
 
 
@@ -418,9 +439,9 @@ def cleanup() -> None:
         return
     try:
         g = _gpio()
-        for pin in RELAY_PINS.values():
+        for ch, pin in RELAY_PINS.items():
             try:
-                g.output(pin, _on_value(False))
+                g.output(pin, _on_value(False, ch))
             except Exception:
                 pass
         g.cleanup()
