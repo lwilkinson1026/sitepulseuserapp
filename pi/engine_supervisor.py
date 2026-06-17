@@ -464,15 +464,15 @@ class EngineSupervisor:
 
         # The user-facing "Auto Recharge" toggle on the Schedule tab writes
         # to config/charge.enabled (carried over from the legacy Phase C
-        # scheduler). Treat that as the master enable for the supervisor —
-        # if it's on, the supervisor activates regardless of any value left
-        # in config/engine.supervisor.enabled. This keeps the app's existing
-        # toggle as the single source of truth without needing app changes.
+        # scheduler). It is the single source of truth for the supervisor:
+        # when config/charge exists, its `enabled` value fully determines
+        # whether the supervisor acts, overriding config/engine.supervisor.enabled
+        # in BOTH directions. (config/engine.supervisor.enabled only survives
+        # as a fallback when config/charge is missing entirely.)
         try:
             charge_snap = self.db.document(f"units/{self.unit_id}/config/charge").get()
             if charge_snap.exists:
-                if bool((charge_snap.to_dict() or {}).get("enabled", False)):
-                    cfg["enabled"] = True
+                cfg["enabled"] = bool((charge_snap.to_dict() or {}).get("enabled", False))
         except Exception as e:
             print(f"[supervisor] config/charge read failed: {e!r}", flush=True)
 
