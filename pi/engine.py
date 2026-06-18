@@ -148,7 +148,7 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # Amps to extract from the motor (generator mode). Sent as negative
     # SET_CURRENT. Conservative default so the engine isn't bogged down
     # before we know what it can sustain.
-    "currentAmps":      10.0,
+    "currentAmps":      25.0,
     # Voltage thresholds. Pack voltage as reported by the VESC.
     # 15S LiFePO4: ~52.8 V resting full (measured), ~51.5 V ≈ 90 % SOC,
     # ~46.5 V ≈ 10 % SOC. BMS termination ~3.5 V/cell × 15 = 52.5 V.
@@ -173,9 +173,11 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # Temperature safety. Abort if either exceeds.
     "maxFetTempC":      80.0,
     "maxMotorTempC":    100.0,
-    # Ramp up the load gradually so the engine doesn't get hit with full
-    # regen current instantly.
-    "rampUpSec":        2.0,
+    # Soft-start window. The charge loop slews 0→currentAmps over this many
+    # seconds (currentAmps/rampUpSec A/s), so the engine takes load on
+    # gradually rather than all at once. Also the settle window before
+    # low-voltage / bog-down safety checks arm.
+    "rampUpSec":        60.0,
 }
 
 
@@ -685,12 +687,20 @@ def _run_charge_loop(
     min_rpm         = params["min_rpm_for_load"]
     max_fet_temp    = params["max_fet_temp_c"]
     max_motor_temp  = params["max_motor_temp_c"]
-    # ramp_up_sec is kept on the config doc for backwards compatibility, but
-    # it now only gates the post-ramp safety checks (low_volts/min_rpm) —
-    # the actual ramp is handled by the MAX_SLEW_AMPS_PER_SEC slew limiter
-    # below, which works for both the initial 0→target ramp and any mid-run
-    # engine.charge.tune adjustments.
+    # ramp_up_sec drives a genuine soft-start: during the initial window we
+    # slew at current_amps / ramp_up_sec (e.g. 25A over 60s ≈ 0.42 A/s) so the
+    # engine takes on load gradually instead of being slammed to full regen.
+    # Past the window we revert to MAX_SLEW_AMPS_PER_SEC so mid-run
+    # engine.charge.tune adjustments stay responsive. ramp_up_sec also gates
+    # the post-ramp safety checks (low_volts/min_rpm), so a long soft-start
+    # window naturally suppresses aborts on the expected ramp-in transients.
     settle_sec      = params["ramp_up_sec"]
+    # A/s rate used only while elapsed <= ramp_up_sec. Clamp to the hard slew
+    # ceiling so a tiny ramp_up_sec can't out-run the motor-protection limit.
+    if settle_sec > 0:
+        soft_start_rate = min(MAX_SLEW_AMPS_PER_SEC, params["current_amps"] / settle_sec)
+    else:
+        soft_start_rate = MAX_SLEW_AMPS_PER_SEC
 
     refresh_interval = 1.0 / refresh_hz
 
@@ -741,15 +751,17 @@ def _run_charge_loop(
                 autostop_on_timeout = True
                 break
 
-            # Send tick: slew applied_amps toward the live shared target by
-            # at most MAX_SLEW_AMPS_PER_SEC * refresh_interval per step.
+            # Send tick: slew applied_amps toward the live shared target. During
+            # the soft-start window the per-step cap is soft_start_rate * dt;
+            # afterward it's MAX_SLEW_AMPS_PER_SEC * dt.
             if now - last_send_at >= refresh_interval:
                 dt = max(refresh_interval, now - last_send_at) if last_send_at > 0 else refresh_interval
                 with _charge_target_lock:
                     target_now = _charge_target_amps or 0.0
                 target_now = max(0.0, min(MAX_CHARGE_AMPS_HARD, target_now))
 
-                max_delta = MAX_SLEW_AMPS_PER_SEC * dt
+                slew_rate = soft_start_rate if elapsed <= settle_sec else MAX_SLEW_AMPS_PER_SEC
+                max_delta = slew_rate * dt
                 if abs(target_now - _charge_applied_amps) <= max_delta:
                     _charge_applied_amps = target_now
                 else:

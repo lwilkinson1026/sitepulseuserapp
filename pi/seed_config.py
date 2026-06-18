@@ -157,7 +157,7 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # SET_CURRENT to the VESC (positive = drive, negative = regen).
             # Conservative default so the engine isn't bogged down before
             # we know what it can sustain.
-            "currentAmps":      10.0,
+            "currentAmps":      25.0,
             # Pack voltage to stop charging (charge complete). 15S LiFePO4
             # rests fully charged at ~52.8 V (3.52 V/cell, measured). Set
             # voltageStop just below that so the under-charge-load voltage
@@ -183,9 +183,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # report ~388°C and would trip every attempt.
             "maxFetTempC":      80.0,
             "maxMotorTempC":    100.0,
-            # Ramp the load up gradually so the engine doesn't take a
-            # sudden full-regen hit.
-            "rampUpSec":        2.0,
+            # Soft-start window: the charge loop slews 0→currentAmps over this
+            # many seconds (currentAmps/rampUpSec A/s) so the engine takes the
+            # load on gradually instead of all at once. Also gates the settle
+            # window before low-voltage / bog-down safety checks arm.
+            "rampUpSec":        60.0,
         },
         # Graceful shutdown (engine.stop command).
         "stop": {
