@@ -153,7 +153,13 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # 15S LiFePO4: ~52.8 V resting full (measured), ~51.5 V ≈ 90 % SOC,
     # ~46.5 V ≈ 10 % SOC. BMS termination ~3.5 V/cell × 15 = 52.5 V.
     "voltageStop":      52.5,    # exit charge loop when pack rises above this
-    "voltageMinAbort":  46.0,    # abort if pack falls below (engine not generating)
+    # Hard pack-protection floor: abort charge if pack sags below this.
+    # NOT meant to detect "engine not generating" (the minRpmForLoad bog
+    # check already does that) — a big external load legitimately sags the
+    # pack well below resting, and aborting only drains it faster. So this
+    # sits near BMS-cutoff territory: 42.0 V = 2.8 V/cell on 15S LiFePO4,
+    # ~4.5 V above the ~37.5 V BMS cut, comfortably below heavy-load sag.
+    "voltageMinAbort":  42.0,
     # Safety ceiling — even with no other exit, charge dies after this much
     # wall-clock time, then the engine auto-stops (see _run_charge_loop's
     # autostop_on_timeout). Defaults to the 2-hour hard max. Code clamps to

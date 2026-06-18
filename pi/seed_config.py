@@ -164,11 +164,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # rise doesn't trip the BMS termination point. 52.5 V (3.50 V/cell)
             # lands at ~95–98 % SOC when the load releases.
             "voltageStop":      52.5,
-            # Abort if pack voltage falls below this while loaded — means
-            # the engine isn't generating enough. LiFePO4 BMS typically
-            # cuts ~2.5 V/cell = ~37.5 V on a 15S pack; 46.0 V (3.07 V/cell,
-            # ~10 % SOC) is well above that with comfortable headroom.
-            "voltageMinAbort":  46.0,
+            # Hard pack-protection floor (NOT an "engine not generating"
+            # detector — minRpmForLoad already covers that). A big external
+            # load sags the pack well below resting; aborting there only
+            # drains it faster, so this sits near BMS-cutoff territory.
+            # LiFePO4 BMS cuts ~2.5 V/cell = ~37.5 V on 15S; 42.0 V
+            # (2.8 V/cell) keeps ~4.5 V headroom while clearing load sag.
+            "voltageMinAbort":  42.0,
             # Hard ceiling on charge duration; engine auto-stops on timeout.
             # Code clamps to 2 hours; default to that full 2-hour window.
             "maxDurationSec":   7200,    # 2 hours
