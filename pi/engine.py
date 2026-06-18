@@ -155,8 +155,10 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     "voltageStop":      52.5,    # exit charge loop when pack rises above this
     "voltageMinAbort":  46.0,    # abort if pack falls below (engine not generating)
     # Safety ceiling — even with no other exit, charge dies after this much
-    # wall-clock time. One hour by default. Code clamps to 2 hours hard max.
-    "maxDurationSec":   3600,
+    # wall-clock time, then the engine auto-stops (see _run_charge_loop's
+    # autostop_on_timeout). Defaults to the 2-hour hard max. Code clamps to
+    # MAX_CHARGE_DURATION_HARD regardless.
+    "maxDurationSec":   7200,
     # Watchdog refresh rate for SET_CURRENT.
     "refreshHz":        10,
     # Engine RPM minimum. If RPM drops below this, the engine is being
@@ -690,6 +692,12 @@ def _run_charge_loop(
         _charge_target_amps  = params["current_amps"]
         _charge_applied_amps = 0.0
 
+    # Set when the charge ends on a duration timeout — we shut the engine
+    # down after the loop unwinds (see end of function). Spawning the stop
+    # only after _charge_active clears avoids handle_engine_stop trying to
+    # join this very thread.
+    autostop_on_timeout = False
+
     sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
     try:
         sender.open()
@@ -724,6 +732,7 @@ def _run_charge_loop(
             if elapsed >= max_dur:
                 result_state    = "failed_timeout"
                 result_metadata = {"durationSec": round(elapsed, 1)}
+                autostop_on_timeout = True
                 break
 
             # Send tick: slew applied_amps toward the live shared target by
@@ -855,6 +864,18 @@ def _run_charge_loop(
             _charge_target_amps  = None
             _charge_applied_amps = 0.0
         _charge_active.clear()
+
+    # Charge hit its duration cap. The loop above only released the motor;
+    # the engine is still running with spark energized. Shut it down so it
+    # doesn't idle indefinitely. This runs after the finally cleared
+    # _charge_active, so handle_engine_stop skips the (self-)thread join and
+    # just opens the spark relay + coasts to idle.
+    if autostop_on_timeout:
+        print("[engine] charge timed out — auto-stopping engine", flush=True)
+        try:
+            handle_engine_stop(db, unit_id, {})
+        except Exception as e:
+            print(f"[engine] auto-stop after charge timeout failed: {e!r}", flush=True)
 
 
 def handle_engine_charge(

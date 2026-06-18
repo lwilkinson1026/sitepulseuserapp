@@ -169,8 +169,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # cuts ~2.5 V/cell = ~37.5 V on a 15S pack; 46.0 V (3.07 V/cell,
             # ~10 % SOC) is well above that with comfortable headroom.
             "voltageMinAbort":  46.0,
-            # Hard ceiling on charge duration. Code clamps to 2 hours.
-            "maxDurationSec":   3600,    # 1 hour
+            # Hard ceiling on charge duration; engine auto-stops on timeout.
+            # Code clamps to 2 hours; default to that full 2-hour window.
+            "maxDurationSec":   7200,    # 2 hours
             "refreshHz":        10,
             # Engine RPM minimum. Bog-down protection — abort if the load
             # drags the engine below this.
