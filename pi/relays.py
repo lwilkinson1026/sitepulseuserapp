@@ -192,14 +192,34 @@ def _engine_is_running(db: firestore.Client, unit_id: str) -> bool:
     return False
 
 
+def _fan_channel(db: firestore.Client, unit_id: str) -> Optional[int]:
+    """The aux channel wired to the cooling fans. This channel is hardwired to
+    engine-follow (energized whenever the engine is running/charging) and is
+    NOT user-controllable — the fans must always run while the engine is hot.
+    Read from config/engine.fanRelayChannel; defaults to 3."""
+    try:
+        snap = db.document(f"units/{unit_id}/config/engine").get()
+        if snap.exists:
+            ch = (snap.to_dict() or {}).get("fanRelayChannel")
+            if ch in (1, 2, 3):
+                return int(ch)
+    except Exception:
+        pass
+    return 3
+
+
 def reconcile_engine_follow(
     db: firestore.Client,
     unit_id: str,
     engine_state: Optional[str] = None,
 ) -> None:
-    """Drive every non-light aux channel whose mode is 'auto' to match whether
-    the engine is running. Called on each engine state transition (from
-    engine.py's _publish_state) and when a channel is switched into 'auto'.
+    """Drive engine-follow aux channels to match whether the engine is running.
+    Called on each engine state transition (from engine.py's _publish_state)
+    and when a channel is switched into 'auto'.
+
+    A channel follows the engine if either its config mode is 'auto' OR it is
+    the designated fan channel (which follows unconditionally, regardless of
+    mode — the fans are safety-critical and not user-controllable).
 
     `engine_state` is the freshly-published state when the caller already has
     it; otherwise we read current/engine ourselves.
@@ -211,6 +231,7 @@ def reconcile_engine_follow(
         else _engine_is_running(db, unit_id)
     )
     light_ch = _light_channel(db, unit_id)
+    fan_ch = _fan_channel(db, unit_id)
     try:
         snap = db.document(f"units/{unit_id}/config/relays").get()
         channels = (snap.to_dict() or {}).get("channels", {}) if snap.exists else {}
@@ -222,7 +243,8 @@ def reconcile_engine_follow(
         for ch in RELAY_PINS:
             if ch == light_ch:
                 continue
-            if channels.get(str(ch), {}).get("mode") == "auto" and _relay_logical[ch] != running:
+            follows = ch == fan_ch or channels.get(str(ch), {}).get("mode") == "auto"
+            if follows and _relay_logical[ch] != running:
                 _drive(ch, running)
                 changed = True
         if changed:
@@ -289,6 +311,11 @@ def handle_relay_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]
         raise ValueError(f"relay.set: invalid mode {mode!r}")
 
     light_ch = _light_channel(db, unit_id)
+    # The fan channel is hardwired to engine-follow and not user-controllable.
+    # Coerce any stray command on it to 'auto' so it can never be left forced
+    # on/off out of sync with the engine.
+    if channel == _fan_channel(db, unit_id) and channel != light_ch:
+        mode = "auto"
     # For a non-light channel switched into 'auto' (engine-follow), seed its
     # state from the current engine state right now — read before taking the
     # lock so we don't do Firestore I/O while holding it.

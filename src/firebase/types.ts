@@ -265,6 +265,10 @@ export interface EngineStartConfig {
 export interface EngineConfig {
   supervisor?: Partial<EngineSupervisorConfig>;
   charge?: Partial<EngineChargeConfig>;
+  // Waveshare channel wired to the cooling fans. Hardwired to engine-follow on
+  // the Pi (always energized while the engine runs) and hidden from the
+  // Outlets screen — not user-controllable. Defaults to 3.
+  fanRelayChannel?: number;
   // The app reads start.sparkRelayChannel so the Outlets screen can hide the
   // engine-follow 'auto' mode on the spark channel (it's engine-managed).
   start?: Partial<EngineStartConfig>;
