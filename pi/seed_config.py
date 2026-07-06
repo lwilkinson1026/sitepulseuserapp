@@ -48,6 +48,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "autoTimeoutSec": 90,
         "autoOnlyAfterDark": True,
     },
+    # Telegram/notification recipients. The events Cloud Function reads
+    # telegramChatIds and messages each one on engine.start/stop (and other
+    # notifiable event kinds). The bot token is NOT here — it's a Function
+    # secret (TELEGRAM_BOT_TOKEN). Add chat IDs as strings, e.g. ["123456789"].
+    "notifications": {
+        "telegramChatIds": [],
+    },
     "sentry": {
         "enabled": False,
         "sensitivity": 0.4,

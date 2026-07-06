@@ -162,6 +162,13 @@ export interface LightConfig {
   autoOnlyAfterDark: boolean;      // gate auto-on by sun-down time
 }
 
+// units/{unitId}/config/notifications — notification recipients. The events
+// Cloud Function reads telegramChatIds and messages each on notifiable events
+// (engine.start/stop, etc.). The bot token is a Function secret, not stored here.
+export interface NotificationsConfig {
+  telegramChatIds: string[];       // Telegram chat IDs to message
+}
+
 // units/{unitId}/config/sentry — motion detection + alerting.
 export interface SentryConfig {
   enabled: boolean;
