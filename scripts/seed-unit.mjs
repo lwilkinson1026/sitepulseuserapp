@@ -95,6 +95,57 @@ await db
     { merge: true },
   );
 
+// Fuel dashboard settings — owner-writable doc the FuelPanel reads. Seeded
+// with the 5-gal external-tank default so the gauge renders before the user
+// opens settings.
+await db.doc(`units/${UNIT_ID}/fuel/settings`).set(
+  {
+    tankGallons: 5.0,
+    seedBurnRateGalPerHour: 0.2,
+    pricePerGallon: 3.75,
+  },
+  { merge: true },
+);
+
+// Optional: synthesize a refuel + a week of engine sessions so the fuel
+// dashboard has something to chew on without a live Pi. Off by default
+// (SEED_FUEL=1 to enable) since it appends real events to the log.
+if (process.env.SEED_FUEL === '1') {
+  const now = Date.now();
+  const DAY = 86_400_000;
+  const events = db.collection(`units/${UNIT_ID}/events`);
+
+  // A "filled to full" 7 days ago that took 4.6 gal — closes the calibration
+  // equation against the prior fill.
+  await events.add({
+    kind: 'fuel.refuel',
+    at: new Date(now - 7 * DAY),
+    source: 'app',
+    payload: { method: 'full', gallons: 4.6, levelAfter: 5.0 },
+  });
+
+  // ~2 h of runtime each of the last 7 days (a start + stop pair per day).
+  for (let d = 6; d >= 0; d--) {
+    const startMs = now - d * DAY - 10 * 3_600_000; // ~10:00 back that day
+    const stopMs = startMs + 2 * 3_600_000;
+    await events.add({
+      kind: 'engine.start',
+      at: new Date(startMs),
+      source: 'pi',
+      payload: { reason: 'schedule' },
+    });
+    await events.add({
+      kind: 'engine.stop',
+      at: new Date(stopMs),
+      source: 'pi',
+      payload: { reason: 'supervisor_full', socAtStop: 98 },
+    });
+  }
+  console.log(`Seeded fuel/settings + synthetic fuel events for ${UNIT_ID}.`);
+} else {
+  console.log(`Seeded fuel/settings for ${UNIT_ID}. (SEED_FUEL=1 to add sample events.)`);
+}
+
 console.log(`Seeding ${UNIT_ID} every ${INTERVAL_MS}ms. Ctrl+C to stop.`);
 console.log(`Reminder: set ownerId on units/${UNIT_ID} in the Firebase Console to your auth uid.`);
 

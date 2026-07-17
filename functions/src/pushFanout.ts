@@ -54,6 +54,17 @@ const COPY: Record<string, { title: string; body: (payload: Record<string, unkno
     title: 'Geofence tripped',
     body: () => 'The unit moved outside its geofence. Tap for live location.',
   },
+  'fuel.low': {
+    title: 'Low fuel',
+    body: (p) =>
+      typeof p.level === 'number'
+        ? `~${(p.level as number).toFixed(1)} gal left. Plan a refuel soon.`
+        : 'Fuel is running low. Plan a refuel soon.',
+  },
+  'fuel.empty': {
+    title: 'Out of fuel',
+    body: () => 'The tank is empty — the generator can no longer run. Refuel to resume.',
+  },
 };
 
 // Send one Telegram message. Best-effort: logs and swallows failures so a
