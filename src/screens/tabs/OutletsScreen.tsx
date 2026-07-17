@@ -51,9 +51,15 @@ export function OutletsScreen() {
   // stable across renders (React's rules-of-hooks).
   const lightChannel = (lightConfig.data?.relayChannel ?? 1) as 1 | 2 | 3;
   const sparkChannel = (engineConfig.data?.start?.sparkRelayChannel ?? 2) as 1 | 2 | 3;
+  // The fan channel is hardwired to engine-follow on the Pi and not
+  // user-controllable, so it's hidden from this screen entirely.
+  const fanChannel = (engineConfig.data?.fanRelayChannel ?? 3) as 1 | 2 | 3;
   const auxChannels = useMemo(
-    () => ([1, 2, 3] as Array<1 | 2 | 3>).filter((c) => c !== lightChannel),
-    [lightChannel],
+    () =>
+      ([1, 2, 3] as Array<1 | 2 | 3>).filter(
+        (c) => c !== lightChannel && c !== fanChannel,
+      ),
+    [lightChannel, fanChannel],
   );
   // Spark channel is driven by the engine sequence, so engine-follow 'auto'
   // would be meaningless there — offer it only on the other aux channel(s).
@@ -181,9 +187,11 @@ export function OutletsScreen() {
         </View>
 
         {/* ── Aux outputs ────────────────────────────────────────────── */}
-        <View style={styles.sectionHeader}>
-          <Eyebrow parts={['Aux outputs', `${auxChannels.length} channels`]} />
-        </View>
+        {auxChannels.length > 0 ? (
+          <View style={styles.sectionHeader}>
+            <Eyebrow parts={['Aux outputs', `${auxChannels.length} channels`]} />
+          </View>
+        ) : null}
 
         {auxChannels.map((channel) => {
           const channelKey = String(channel) as '1' | '2' | '3';

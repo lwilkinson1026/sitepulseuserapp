@@ -82,10 +82,24 @@ service cloud.firestore {
                      && resource.data.status == 'pending';
       }
 
-      // Append-only event log.
+      // Append-only event log. Authoritative events come from the Pi/cloud
+      // via the Admin SDK (which bypasses rules). The one exception: the owner
+      // may append a `fuel.refuel` note (source 'app') — a user-authored fact
+      // about their own tank with no hardware side effects. Kept deliberately
+      // narrow: only that one kind, and never editable/deletable once written.
       match /events/{evtId} {
         allow read: if isOwnerOf(unitId);
-        allow write: if false;
+        allow create: if isOwnerOf(unitId)
+                     && request.resource.data.kind == 'fuel.refuel'
+                     && request.resource.data.source == 'app';
+        allow update, delete: if false;
+      }
+
+      // Fuel dashboard settings (tank size, price, burn-rate prior). Owner
+      // preferences with no hardware effect, so — unlike config/* — the owner
+      // writes these directly instead of round-tripping a command.
+      match /fuel/{doc} {
+        allow read, write: if isOwnerOf(unitId);
       }
 
       // Roles (phase 2 — multi-user per unit). Owner manages members.

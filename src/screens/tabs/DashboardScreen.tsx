@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { CornerBrackets, Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
+import { CornerBrackets, Eyebrow, FigCaption, FuelAlertBanner, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
 import { useAuth } from '../../hooks/AuthContext';
@@ -404,6 +404,8 @@ export function DashboardScreen() {
           live
           staleness={stalenessKind}
         />
+
+        <FuelAlertBanner unitId={DEV_UNIT_ID} />
 
         <CornerBrackets style={styles.hero}>
           <View style={styles.heroInner}>

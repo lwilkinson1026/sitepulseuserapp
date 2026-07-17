@@ -245,6 +245,48 @@ def _load_stop_config(db: firestore.Client, unit_id: str) -> Dict[str, Any]:
     return cfg
 
 
+# States in which the engine is physically turning. Crossing into/out of this
+# set is what we notify on (engine.start / engine.stop events).
+_ENGINE_RUNNING_STATES = ("running", "charging")
+
+# Edge tracker for engine.start/stop event emission. _publish_state is the
+# single chokepoint every transition passes through (manual, supervisor, and
+# scare paths all funnel here), so tracking the running/not-running edge here
+# gives exactly one event per real start and one per real shutdown, regardless
+# of who triggered it. Process-local: reset to a clean 'idle' on listener boot
+# via init_engine().
+_engine_event_lock = threading.Lock()
+_last_engine_running: Dict[str, bool] = {}
+
+
+def _emit_engine_edge_event(db: firestore.Client, unit_id: str, state: str) -> None:
+    """Emit a canonical engine.start / engine.stop event when the engine
+    crosses into or out of a running state. Writes the app/Function schema
+    (`kind`/`at`/`source`/`payload`) so it shows in the Activity feed AND
+    triggers the push/Telegram fan-out. Best-effort — never blocks state
+    publishing."""
+    running = state in _ENGINE_RUNNING_STATES
+    with _engine_event_lock:
+        prev = _last_engine_running.get(unit_id)
+        if prev == running:
+            return
+        _last_engine_running[unit_id] = running
+        # First observation for this unit (typically the boot 'idle'): record
+        # the baseline but don't emit a spurious 'stop' for a not-running seed.
+        if prev is None and not running:
+            return
+        kind = "engine.start" if running else "engine.stop"
+    try:
+        db.collection(f"units/{unit_id}/events").add({
+            "kind": kind,
+            "at": firestore.SERVER_TIMESTAMP,
+            "source": "pi",
+            "payload": {"state": state},
+        })
+    except Exception as e:
+        print(f"[engine] event emit failed for {kind}: {e}", flush=True)
+
+
 def _publish_state(
     db: firestore.Client,
     unit_id: str,
@@ -261,6 +303,9 @@ def _publish_state(
         db.document(f"units/{unit_id}/current/engine").set(payload, merge=True)
     except Exception as e:
         print(f"[engine] failed to publish state {state!r}: {e}", flush=True)
+
+    # Fire engine.start / engine.stop on the running-state edge (best-effort).
+    _emit_engine_edge_event(db, unit_id, state)
 
     # Drive any engine-follow aux relay (e.g. cooling fans on a channel set to
     # 'auto') to match. Lazy import keeps engine.py importable off-Pi; the

@@ -6,7 +6,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { Eyebrow, FigCaption, Screen, SecondaryCTA } from '../../components';
+import { Eyebrow, FigCaption, FuelPanel, Screen, SecondaryCTA } from '../../components';
 import { useAuth } from '../../hooks/AuthContext';
 import { useUnitEvents, type EventEntry } from '../../hooks/useUnitEvents';
 import type { EventKind } from '../../firebase/types';
@@ -31,6 +31,9 @@ const KIND_LABEL: Record<EventKind, string> = {
   'theft.tripped':  'THEFT ALERT',
   'system.online':  'SYSTEM ONLINE',
   'system.offline': 'SYSTEM OFFLINE',
+  'fuel.refuel':    'REFUELED',
+  'fuel.low':       'LOW FUEL',
+  'fuel.empty':     'OUT OF FUEL',
 };
 
 // Pull a one-line summary out of the event payload. Different event kinds
@@ -59,6 +62,16 @@ function summarize(event: EventEntry): string {
       return event.source === 'app' ? 'BY USER' : 'BY SYSTEM';
     case 'theft.tripped':
       return 'GEOFENCE BREACHED';
+    case 'fuel.refuel': {
+      const method = p.method === 'add' ? 'ADDED' : 'FILLED';
+      const gallons = typeof p.gallons === 'number' ? `${p.gallons} GAL` : null;
+      return gallons ? `${method} · ${gallons}` : method;
+    }
+    case 'fuel.low':
+    case 'fuel.empty': {
+      const level = typeof p.level === 'number' ? `${p.level.toFixed(1)} GAL` : null;
+      return level ?? '—';
+    }
     case 'system.online':
     case 'system.offline':
       // Streamer reuses system.online for camera lifecycle — pull action if set.
@@ -102,6 +115,14 @@ export function ActivityScreen() {
           <Eyebrow
             parts={['05 / Activity', `${events.events.length} events`]}
           />
+        </View>
+
+        <View style={styles.fuel}>
+          <FuelPanel unitId={DEV_UNIT_ID} />
+        </View>
+
+        <View style={styles.listHeader}>
+          <Eyebrow parts={['Event log']} />
         </View>
 
         <View style={styles.list}>
@@ -152,6 +173,12 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxl,
   },
   header: { paddingTop: spacing.md, paddingBottom: spacing.lg },
+  fuel: {
+    paddingBottom: spacing.lg,
+    borderBottomWidth: hairline,
+    borderBottomColor: colors.borderHairline,
+  },
+  listHeader: { paddingTop: spacing.lg, paddingBottom: spacing.sm },
   list: {
     borderTopWidth: hairline,
     borderTopColor: colors.borderHairline,

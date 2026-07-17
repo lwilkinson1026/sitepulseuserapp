@@ -35,9 +35,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "channels": {
             "1": {"label": "Security Light",   "mode": "auto"},
             "2": {"label": "Aux 2",            "mode": "off"},
-            # Channel 3 follows the engine by default: 'auto' energizes it
-            # whenever the engine is running/charging (e.g. cooling fans).
-            "3": {"label": "User Aux Output",  "mode": "auto"},
+            # Channel 3 drives the cooling fans and is hardwired to
+            # engine-follow (see engine.fanRelayChannel). It is not
+            # user-controllable — the Pi energizes it whenever the engine is
+            # running/charging, regardless of this mode. Hidden in the app.
+            "3": {"label": "Cooling Fans",     "mode": "auto"},
         },
     },
     "light": {
@@ -45,6 +47,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "mode": "auto",
         "autoTimeoutSec": 90,
         "autoOnlyAfterDark": True,
+    },
+    # Telegram/notification recipients. The events Cloud Function reads
+    # telegramChatIds and messages each one on engine.start/stop (and other
+    # notifiable event kinds). The bot token is NOT here — it's a Function
+    # secret (TELEGRAM_BOT_TOKEN). Add chat IDs as strings, e.g. ["123456789"].
+    "notifications": {
+        "telegramChatIds": [],
     },
     "sentry": {
         "enabled": False,
@@ -106,6 +115,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "pressDurationSec": 0.15,
     },
     "engine": {
+        # Waveshare relay channel wired to the cooling fans. Hardwired to
+        # engine-follow in pi/relays.py: energized whenever the engine is
+        # running/charging, regardless of config/relays mode. The app hides
+        # this channel from the Outlets screen (not user-controllable).
+        "fanRelayChannel": 3,
         # VESC starter-cranking parameters. The engine.crank command reads
         # this; payload overrides at command time. All values are clamped
         # to hard safety ceilings in pi/engine.py regardless of config.

@@ -162,6 +162,13 @@ export interface LightConfig {
   autoOnlyAfterDark: boolean;      // gate auto-on by sun-down time
 }
 
+// units/{unitId}/config/notifications — notification recipients. The events
+// Cloud Function reads telegramChatIds and messages each on notifiable events
+// (engine.start/stop, etc.). The bot token is a Function secret, not stored here.
+export interface NotificationsConfig {
+  telegramChatIds: string[];       // Telegram chat IDs to message
+}
+
 // units/{unitId}/config/sentry — motion detection + alerting.
 export interface SentryConfig {
   enabled: boolean;
@@ -265,6 +272,10 @@ export interface EngineStartConfig {
 export interface EngineConfig {
   supervisor?: Partial<EngineSupervisorConfig>;
   charge?: Partial<EngineChargeConfig>;
+  // Waveshare channel wired to the cooling fans. Hardwired to engine-follow on
+  // the Pi (always energized while the engine runs) and hidden from the
+  // Outlets screen — not user-controllable. Defaults to 3.
+  fanRelayChannel?: number;
   // The app reads start.sparkRelayChannel so the Outlets screen can hide the
   // engine-follow 'auto' mode on the spark channel (it's engine-managed).
   start?: Partial<EngineStartConfig>;
@@ -380,7 +391,14 @@ export type EventKind =
   | 'sentry.disarmed'
   | 'theft.tripped'
   | 'system.online'
-  | 'system.offline';
+  | 'system.offline'
+  // Fuel dashboard. `fuel.refuel` is owner-authored (source: 'app') — the one
+  // event kind the client is allowed to append (see firestore.rules). The
+  // `fuel.low` / `fuel.empty` alerts are emitted server-side (Pi/cloud) so
+  // they can ride the existing pushFanout notification path.
+  | 'fuel.refuel'
+  | 'fuel.low'
+  | 'fuel.empty';
 
 export interface EventDoc {
   kind: EventKind;
@@ -390,6 +408,46 @@ export interface EventDoc {
   // Optional rich attachments — populated for motion events with a clip.
   clipPath?: string;
   thumbnailPath?: string;
+}
+
+// engine.stop payload enrichment — see pi/fuel_engine_stop_enrichment.md.
+// All fields optional: older Pi firmware emits a bare {state} payload, so the
+// fuel model must degrade gracefully when reason/voltageAtStop/socAtStop are
+// absent (falls back to full→full calibration; no dry-stop detection).
+export type EngineStopReason = 'supervisor_full' | 'manual' | 'stalled' | 'fault';
+
+export interface EngineStopPayload {
+  state?: string;
+  reason?: EngineStopReason;       // 'stalled' + battery-not-full ⇒ ran dry
+  voltageAtStop?: number;          // pack volts at the transition to idle
+  socAtStop?: number | null;       // LCD SoC at stop, null if unmapped
+}
+
+export type FuelRefuelMethod = 'full' | 'add';
+
+// Payload for a `fuel.refuel` event (written by the app, source: 'app').
+//   method 'full' → tank filled to capacity; `gallons` is the OPTIONAL
+//                   "how much did it take?" amount that, when present, feeds
+//                   burn-rate calibration.
+//   method 'add'  → partial top-off; `gallons` is required.
+// `levelAfter` is the app-computed tank level (gallons) right after the fill,
+// persisted so the model can anchor without replaying the whole refuel chain.
+export interface FuelRefuelPayload {
+  method: FuelRefuelMethod;
+  gallons: number | null;
+  levelAfter: number;
+}
+
+// units/{unitId}/fuel/settings — owner-writable fuel dashboard settings.
+// Unlike config/* docs (Pi-owned, client-read-only), this lives under a
+// dedicated `fuel` subcollection the security rules let the owner write:
+// tank size / price / burn-rate prior are user preferences with no hardware
+// side effects.
+export interface FuelSettings {
+  tankGallons: number;             // usable capacity of the onboard tank (gal)
+  pricePerGallon?: number;         // optional — enables cost readouts
+  // Seed prior for gal/hr, used until the model has ≥1 calibration sample.
+  seedBurnRateGalPerHour: number;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
