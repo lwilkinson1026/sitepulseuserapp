@@ -114,15 +114,38 @@ CROP_SCALE = int(os.environ.get("SITEPULSE_LCD_CROP_SCALE", "3"))
 # the dead LCD area immediately to its right, which cancels ambient warm room
 # light and sensor noise that would otherwise swamp a glyph this small.
 #
-# ROI is in *stored image* coordinates, i.e. after CROP and CROP_SCALE. It is
-# therefore only valid for the default CROP; re-derive both together.
+# Both rectangles are in *stored image* coordinates, i.e. after CROP and
+# CROP_SCALE, so they are only valid for the default CROP — re-derive them
+# together if the crop or the camera moves.
 #
-# Measured on UNIT-002 2026-07-28: lit ≈ 10-12, dark ≈ 4.4.  Threshold at 7.
+# The background patch sits directly BELOW the glyph on the same backlit area.
+# That placement matters more than it looks: an earlier version sampled the
+# dark bezel to the right of the LCD, which made the score a measure of *panel
+# brightness* rather than of the glyph.  It then read "lit" on a display that
+# was awake with AC off, and "dark" only when the panel slept — i.e. it
+# agreed with every candidate register bit equally and discriminated nothing.
+#
+# Chosen by differencing 37 AC-on against 5 AC-off frames (labels from reg
+# 0x10 bit 4) and searching background candidates for the widest margin:
+#   AC-on 5.4 .. 18.7      AC-off -4.1 .. -1.5      threshold 2.0
+# Capture exposure must be pinned via configure_camera() first; at auto or
+# raised exposure the classes overlap.
+#
+# TREAT THIS AS A ROUGH DIAGNOSTIC, NOT AS GROUND TRUTH.  It has a known
+# confound: DC-only frames drawing ~950 W (session 20260728-165657) score
+# 7.4-8.0 and so read as "lit" even though the register bit and a direct
+# visual check both say AC is off.  The ROI sits next to the watts digits,
+# which are blank at 0 W and lit under load on *either* outlet, so at 3x
+# upscale their bleed contaminates it.  Separating that properly needs a
+# tighter ROI captured at higher exposure than the blue segments want.
+#
+# The authoritative AC signal is reg 0x10 bit 4 in predator_decoder.py; this
+# score exists to flag disagreements worth investigating, not to override it.
 AC_ICON_ROI = tuple(int(v) for v in os.environ.get(
-    "SITEPULSE_LCD_AC_ICON_ROI", "1000:1120:415:515").split(":"))
-AC_ICON_BG_X = tuple(int(v) for v in os.environ.get(
-    "SITEPULSE_LCD_AC_ICON_BG", "1150:1270").split(":"))
-AC_ICON_THRESHOLD = float(os.environ.get("SITEPULSE_LCD_AC_ICON_THRESHOLD", "7.0"))
+    "SITEPULSE_LCD_AC_ICON_ROI", "1040:1100:404:452").split(":"))
+AC_ICON_BG = tuple(int(v) for v in os.environ.get(
+    "SITEPULSE_LCD_AC_ICON_BG", "1040:1100:500:548").split(":"))
+AC_ICON_THRESHOLD = float(os.environ.get("SITEPULSE_LCD_AC_ICON_THRESHOLD", "2.0"))
 
 
 def score_ac_icon(image: Path) -> Optional[float]:
@@ -139,15 +162,20 @@ def score_ac_icon(image: Path) -> Optional[float]:
     except ImportError:
         return None
     x0, x1, y0, y1 = AC_ICON_ROI
-    bx0, bx1 = AC_ICON_BG_X
+    bx0, bx1, by0, by1 = AC_ICON_BG
     try:
         arr = np.asarray(Image.open(image).convert("RGB"))
     except Exception:
         return None
-    if arr.shape[0] < y1 or arr.shape[1] < max(x1, bx1):
+    # Require the *exact* geometry the ROI was derived against, not merely a
+    # big-enough image.  Sessions captured under an older CROP are the same
+    # scene at a different offset, so a permissive check silently scores a
+    # patch of blank LCD and reports it as confidently lit.
+    cw, ch, _, _ = (int(v) for v in CROP.split(":"))
+    if arr.shape[:2] != (ch * CROP_SCALE, cw * CROP_SCALE):
         return None
     orange = np.clip(arr[:, :, 0].astype(np.int16) - arr[:, :, 2].astype(np.int16), 0, None)
-    return round(float(orange[y0:y1, x0:x1].mean() - orange[y0:y1, bx0:bx1].mean()), 2)
+    return round(float(orange[y0:y1, x0:x1].mean() - orange[by0:by1, bx0:bx1].mean()), 2)
 
 SESSION_ROOT = Path(os.environ.get("SITEPULSE_LCD_CALIB_DIR", "~/lcd_calib")).expanduser()
 

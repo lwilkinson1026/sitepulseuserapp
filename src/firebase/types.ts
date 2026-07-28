@@ -46,11 +46,11 @@ export interface TelemetrySnapshot {
   // current (reg00, reg01) byte pair is not yet in the decoder's lookup
   // table; the publisher logs every unknown pair so the table grows over
   // normal use.  The scheduler safe-defaults to idle when soc is null.
-  battery_soc: number | null;      // 0–100 % (or null if unmapped)
+  battery_soc: number | null;      // 0–100 % (null when the LCD is asleep)
 
   // Output state derived from the LCD
   dc_active: boolean;              // DC outlet button enabled
-  ac_active: boolean;              // AC outlet button enabled (heuristic)
+  ac_active: boolean;              // AC inverter on (orange outlet glyph on the LCD)
   output_mode: 'AC' | 'DC' | 'AC+DC' | 'off';
   output_watts: number | null;     // current draw in watts (null if any digit unmapped)
   time_to_empty_minutes: number | null;  // remaining runtime, null when LCD shows the 99:59 placeholder

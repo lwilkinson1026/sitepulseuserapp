@@ -16,8 +16,10 @@ glues the two together and publishes the result.
 Encoding notes (derived empirically — see ../docs not yet written):
 
   Reg 0x00, 0x01            battery percentage + battery icon + "%" symbol.
-                            Custom segment encoding, NOT 7-segment digits.
-                            We hold a lookup table; unknowns return None.
+                            Ordinary 7-segment digits sharing the watts
+                            segment map, shifted left one bit:
+                            `_WATTS_DIGITS[reg >> 1]`.  Reg 0x00 bit 0 is the
+                            hundreds "1"; reg 0x01 bit 0 is the "%" glyph.
 
   Reg 0x02, 0x03, 0x04, 0x11  watts digit (1000s, 100s, 10s, 1s respectively)
                             7-segment, position-specific bit mapping.
@@ -31,6 +33,13 @@ Encoding notes (derived empirically — see ../docs not yet written):
                             Bit 7 of reg 0x0C is the colon between the
                             second and third digit.
   Reg 0x0F, 0x10            label segments ("WATTS", "TIME TO EMPTY", "OUT").
+  Reg 0x10 bit 3            LCD awake (set in essentially every decodable
+                            frame — an inviting false positive, do not use
+                            it as an output indicator).
+  Reg 0x10 bit 4            AC inverter on — the orange NEMA-outlet glyph.
+                            Clear while ~950 W flows on DC, set while DC is
+                            also on, so it is AC-specific rather than a
+                            "load present" flag.
 
 Anything not in our digit tables decodes as None with a warning attached
 so the publisher logs it and the scheduler stays safe (battery_soc=None
@@ -246,29 +255,50 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # ── output mode (DC / AC / both / off) ────────────────────────────────
     # bit 7 of reg 0x11 is the DC outlet button indicator (set when DC is
     # toggled on, independent of whether the AC outlet is also enabled).
-    # AC active is detected by ANY watts being drawn that isn't DC's draw —
-    # but since we don't easily distinguish, we currently use reg 0x07 bit 0
-    # as "some output active" and infer AC by elimination.  This is imperfect
-    # when both are on; future work: identify the AC-specific bit.
+    #
+    # AC is reg 0x10 bit 4 — the orange NEMA-outlet glyph on the LCD, which
+    # the panel lights whenever the inverter is on.  Identified 2026-07-28 on
+    # UNIT-002 by photographing the display across an AC off→on toggle while
+    # the LCD stayed awake, which is the one state the earlier attempts never
+    # isolated (every previous "AC off" sample was really the whole display
+    # asleep, so every candidate bit correlated equally).
+    #
+    # It is genuinely AC-specific rather than a generic "load present" flag:
+    # in session 20260728-165657 roughly 950 W flows on DC with this bit
+    # CLEAR, and in session 20260728-171342 it is SET while DC is also on.
+    #
+    # Do not confuse it with bit 3 of the same register, which tracks the
+    # LCD being awake and is therefore set in almost every frame worth
+    # decoding — that is what makes it such an inviting false positive.
     output_active = bool(regs[0x07] & 0x01)
-    dc_active     = bool(regs[0x11] & 0x80)
-    # If output is active but DC isn't, AC must be.  When both could be on,
-    # this still flags AC correctly as long as DC isn't the only output.
-    ac_active     = output_active and not dc_active
-    # When both are on we currently can't see it from one byte; the publisher
-    # log + raw_frame_hex helps refine this as more states are observed.
+    # Both outlet flags are only meaningful while the display is driving its
+    # output row; during the wake/sleep transition the panel latches one of
+    # them a frame or two out of step with the rest.  Gating here keeps
+    # ac_active/dc_active consistent with output_mode, so the app can never
+    # be handed mode="off" alongside ac_active=True.
+    dc_active     = output_active and bool(regs[0x11] & 0x80)
+    ac_active     = output_active and bool(regs[0x10] & 0x10)
 
+    # A frame can show AC or DC set while the "output active" label is clear
+    # during the display's wake/sleep transition.  Treat that as off rather
+    # than reporting a mode built from a half-latched frame.
     if not output_active:
         output_mode = "off"
     elif dc_active and ac_active:
         output_mode = "AC+DC"
     elif dc_active:
         output_mode = "DC"
-    else:
+    elif ac_active:
         output_mode = "AC"
+    else:
+        # Display awake, output label lit, but neither outlet flagged. Real
+        # and routine: the panel sits here after AC is switched off but
+        # before it sleeps.  Previously this fell through to "AC", which is
+        # exactly backwards.
+        output_mode = "off"
 
     # ── watts (1-4 digits across reg 0x02, 0x03, 0x04, 0x11) ──────────────
-    if output_mode == "off":
+    if not output_active:
         output_watts: Optional[int] = None
     else:
         d_thousands = _watts_digit(regs[0x02], warnings, "1000s")
@@ -283,7 +313,7 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
             output_watts = int(digits_str) if digits_str else 0
 
     # ── time-to-empty (HH:MM across reg 0x0B, 0x0C+colon, 0x0D, 0x0E) ─────
-    if output_mode == "off":
+    if not output_active:
         time_to_empty_minutes: Optional[int] = None
     else:
         d1, _     = _time_digit(regs[0x0B], False, warnings, "time-1")
@@ -311,7 +341,13 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # ── system_mode (matches the field scheduler.py and the app expect) ──
     # We can't yet detect charging from the LCD bytes (no charging-input
     # captured yet).  Discharging = any output active.  Otherwise idle.
-    if output_mode in ("AC", "DC"):
+    #
+    # "AC+DC" was missing from this test, so a unit discharging on both
+    # outlets reported "idle" — which the scheduler reads as "safe to leave
+    # the engine off".  It had never fired before because ac_active could not
+    # previously be true at the same time as dc_active.  Making AC detection
+    # work is what exposed it.
+    if output_mode in ("AC", "DC", "AC+DC"):
         system_mode = "discharging"
     else:
         system_mode = "idle"
