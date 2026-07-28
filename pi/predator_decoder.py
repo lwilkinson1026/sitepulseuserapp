@@ -85,20 +85,101 @@ _WATTS_DIGITS = {
     0x7F: "8",
 }
 
-# Battery percentage uses a custom segment layout we have not yet fully
-# reverse engineered.  Add observed (reg0x00, reg0x01) pairs here as you
-# capture them.  Unknown pairs decode to None so the scheduler fails safe.
-_BATTERY_SOC_LOOKUP: dict[tuple[int, int], int] = {
-    (0xFE, 0xD7): 85,
-    (0xFE, 0x5D): 78,
-    (0x4A, 0xF7): 76,   # photographed during live session, IMG_5574
-    (0x4A, 0xD7): 73,   # confirmed during heater test in same session
-    (0x4A, 0xDB): 72,   # photographed live, IMG_5578
-    (0x4A, 0xBB): 71,   # confirmed live via raw_frame_hex from Firestore
-    # As you observe more known percentages, append rows like:
-    #   (0xFE, 0x42): 70,
-    # The publisher logs every unknown pair so you can backfill this table.
+# Battery percentage.  This was long assumed to be an opaque custom layout
+# requiring a hand-built lookup table.  It is not: regs 0x00/0x01 are two
+# ordinary 7-segment digits using the *same* segment wiring as the watts
+# digits, shifted left by one bit.
+#
+#     reg 0x00:  bits 1-7 = tens digit      bit 0 = hundreds "1"
+#     reg 0x01:  bits 1-7 = ones digit      bit 0 = the "%" symbol
+#
+# So `_WATTS_DIGITS[reg >> 1]` yields the digit directly, and 100% falls out
+# as reg00 = 0xEF -> hundreds bit set + "0", reg01 = 0xEF -> "0"  =>  "100".
+#
+# Derived 2026-07-28 on UNIT-002 from 14 consecutive states captured during a
+# 1000 W discharge (lcd_calibrate.py session 20260728-171342), cross-checked
+# against camera ground truth.  All ten digits reproduce _WATTS_DIGITS exactly
+# and the map holds across two decades — 0x4B decodes as "7" at both 97% and
+# 87% — so this is a real decode, not a curve fit.
+#
+# Retained below purely as a regression fixture.  NOTE: four entries in the
+# original hand-mapped table were wrong, and were internally inconsistent
+# (it required 0xD7 to mean both "3" and "5").  Corrected values, with the
+# originally recorded value in the comment:
+_BATTERY_SOC_VERIFIED: dict[tuple[int, int], int] = {
+    (0xEF, 0xEF): 100,  # camera + Saleae agreed, UNIT-002 bench
+    (0xDE, 0x4B): 97,   # ─┐
+    (0xDE, 0xF7): 96,   #  │
+    (0xDE, 0xD7): 95,   #  │ 1000 W discharge, monotonic, camera-confirmed
+    (0xDE, 0x5D): 94,   #  │ each step down photographed
+    (0xDE, 0xDB): 93,   #  │
+    (0xDE, 0xBB): 92,   #  │
+    (0xDE, 0x49): 91,   #  │
+    (0xDE, 0xEF): 90,   #  │
+    (0xFE, 0xDF): 89,   #  │
+    (0xFE, 0xFF): 88,   #  │
+    (0xFE, 0x4B): 87,   # ─┘
+    (0xFE, 0xD7): 85,   # original hand-mapped entry — correct
+    (0xFE, 0x5D): 84,   # was recorded 78 — off by 6
+    (0x4A, 0xF7): 76,   # original hand-mapped entry — correct
+    (0x4A, 0xD7): 75,   # was recorded 73
+    (0x4A, 0xDB): 73,   # was recorded 72
+    (0x4A, 0xBB): 72,   # was recorded 71
 }
+
+
+def _decode_battery_soc(hi: int, lo: int, warnings: list[str]) -> Optional[int]:
+    """Decode the battery percentage from regs 0x00 (tens) and 0x01 (ones).
+
+    Returns None on an unrecognised segment pattern so the scheduler fails
+    safe — battery_soc=None short-circuits the engine recharge loop to idle.
+    """
+    tens = _WATTS_DIGITS.get((hi >> 1) & 0x7F)
+    ones = _WATTS_DIGITS.get((lo >> 1) & 0x7F)
+    if tens is None or ones is None:
+        warnings.append(
+            f"undecodable SoC segments: reg00=0x{hi:02X} reg01=0x{lo:02X}"
+        )
+        return None
+
+    hundreds = bool(hi & 0x01)
+    tens, ones = tens.strip(), ones.strip()
+
+    # A fully blank field is the LCD asleep or a torn frame, not a reading.
+    # This is the common case (the panel sleeps on its own), so it returns
+    # None quietly rather than spamming a warning on every frame.
+    if not tens and not ones and not hundreds:
+        return None
+
+    # The ones digit is always displayed on a real reading; the tens digit
+    # blanks only below 10%.  Anything else is a partially-latched frame —
+    # reject it rather than emit a plausible-looking number, because a wrong
+    # SoC silently drives the engine recharge scheduler.
+    if not ones or (hundreds and not tens):
+        warnings.append(
+            f"partial SoC frame: reg00=0x{hi:02X} reg01=0x{lo:02X} "
+            f"(tens={tens or 'blank'!s} ones={ones or 'blank'!s})"
+        )
+        return None
+
+    try:
+        value = int(("1" if hundreds else "") + tens + ones)
+    except ValueError:
+        warnings.append(f"nonsense SoC digits from 0x{hi:02X},0x{lo:02X}")
+        return None
+
+    # The display tops out at 100, so the hundreds segment can only ever
+    # accompany "00".  Any other 3-digit combination is a decode error.
+    if hundreds and value != 100:
+        warnings.append(
+            f"impossible SoC {value} (hundreds bit set) "
+            f"from 0x{hi:02X},0x{lo:02X}"
+        )
+        return None
+    if not 0 <= value <= 100:
+        warnings.append(f"SoC {value} out of range from 0x{hi:02X},0x{lo:02X}")
+        return None
+    return value
 
 
 # ─── Public types ──────────────────────────────────────────────────────────
@@ -160,13 +241,7 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     warnings: list[str] = []
 
     # ── battery percentage ────────────────────────────────────────────────
-    soc_key = (regs[0x00], regs[0x01])
-    battery_soc = _BATTERY_SOC_LOOKUP.get(soc_key)
-    if battery_soc is None:
-        warnings.append(
-            f"unknown SoC bytes: reg00=0x{regs[0x00]:02X} reg01=0x{regs[0x01]:02X} "
-            f"— add to _BATTERY_SOC_LOOKUP"
-        )
+    battery_soc = _decode_battery_soc(regs[0x00], regs[0x01], warnings)
 
     # ── output mode (DC / AC / both / off) ────────────────────────────────
     # bit 7 of reg 0x11 is the DC outlet button indicator (set when DC is
