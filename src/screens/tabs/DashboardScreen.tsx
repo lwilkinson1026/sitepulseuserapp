@@ -384,6 +384,20 @@ export function DashboardScreen() {
     snapshot.motor_volts !== undefined &&
     !snapshot.motor_stale;
   const showChargeTile = isCharging && motorFresh;
+
+  // Distinct from `isCharging` above, which means "the engine is running a
+  // regen charge cycle through the VESC". This one is the Predator on shore
+  // power, read straight off the LCD. Both can be false, either can be true.
+  const wallCharging = snapshot.charging === true;
+  // The LCD reuses one HH:MM field for both estimates, so only one is ever
+  // populated; pick whichever the current layout is reporting.
+  const etaMinutes = wallCharging
+    ? snapshot.time_to_full_minutes
+    : snapshot.time_to_empty_minutes;
+  const etaStr =
+    etaMinutes === null || etaMinutes === undefined
+      ? '—'
+      : `${Math.floor(etaMinutes / 60)}:${String(etaMinutes % 60).padStart(2, '0')}`;
   const chargeAmps = showChargeTile
     ? Math.abs(snapshot.motor_amps_in as number)
     : null;
@@ -413,7 +427,10 @@ export function DashboardScreen() {
             <Text style={styles.heroUnit}>%</Text>
           </View>
           <Text style={styles.heroSub}>
-            STATE OF CHARGE{usingVescFallback ? '  (APPROX)' : ''}  ·  {snapshot.output_mode.toUpperCase()}  ·  {fmt(snapshot.output_watts, 0)} W
+            STATE OF CHARGE{usingVescFallback ? '  (APPROX)' : ''}  ·{' '}
+            {wallCharging
+              ? `CHARGING  ·  ${etaStr} TO FULL`
+              : `${snapshot.output_mode.toUpperCase()}  ·  ${fmt(snapshot.output_watts, 0)} W`}
           </Text>
         </CornerBrackets>
 
@@ -471,13 +488,9 @@ export function DashboardScreen() {
         )}
 
         <View style={styles.metricGroup}>
-          <Eyebrow parts={['Time to empty']} />
+          <Eyebrow parts={[wallCharging ? 'Time to full' : 'Time to empty']} />
           <View style={styles.metricRow}>
-            <Text style={styles.metricBig}>
-              {snapshot.time_to_empty_minutes === null || snapshot.time_to_empty_minutes === undefined
-                ? '—'
-                : `${Math.floor(snapshot.time_to_empty_minutes / 60)}:${String(snapshot.time_to_empty_minutes % 60).padStart(2, '0')}`}
-            </Text>
+            <Text style={styles.metricBig}>{etaStr}</Text>
             <Text style={styles.metricUnit}>h:mm</Text>
           </View>
           <Text style={styles.metricSub}>

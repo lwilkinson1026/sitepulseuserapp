@@ -263,6 +263,19 @@ class EngineSupervisor:
 
         ttempty = telem.get("ttempty")  # minutes, or None
 
+        # Never fire the engine to recharge a pack that is already recharging
+        # from the wall.  The Predator reports this directly now (reg 0x07
+        # bits 2+5); before it was decodable, a charging unit looked like it
+        # was discharging on AC, which is the worst possible reading here —
+        # it would start the generator next to a working shore-power hookup.
+        #
+        # Defaults to False when the key is missing so an older snapshot, or
+        # one published by a Pi that has not taken this decoder update yet,
+        # keeps the previous behaviour rather than silently never starting.
+        if telem.get("charging") and state in (None, "idle"):
+            self._log_skip_charging(soc, soc_source)
+            return
+
         if state in (None, "idle"):
             # 1. Critical SoC — fires even in quiet hours if user allowed it.
             if soc <= soc_critical and (not in_quiet or allow_quiet_override):
@@ -449,6 +462,23 @@ class EngineSupervisor:
             {"soc": soc, "ttempty": ttempty, "sustainableRunwayMin": sustainable},
         )
 
+    def _log_skip_charging(self, soc: int, soc_source: str) -> None:
+        """The pack is on the wall charger, so every auto-start trigger is
+        suppressed.  Throttled like _note_keep_running: a unit left plugged
+        in overnight would otherwise write an event every tick."""
+        now = time.monotonic()
+        if (now - getattr(self, "_last_skip_charging_at", 0.0)) < 300.0:
+            return
+        self._last_skip_charging_at = now
+        self._log_event(
+            "engine.skip_charging",
+            f"Suppressing auto-start: soc={soc}% ({soc_source}) but the "
+            f"Predator is charging from the wall — shore power is already "
+            f"refilling the pack.",
+            "info",
+            {"soc": soc, "socSource": soc_source},
+        )
+
     # ── readers ───────────────────────────────────────────────────────────
 
     def _load_supervisor_config(self) -> Dict[str, Any]:
@@ -528,6 +558,7 @@ class EngineSupervisor:
             "ttempty":      None,
             "output_watts": None,
             "motor_volts":  None,
+            "charging":     False,
         }
         try:
             engine_snap = self.db.document(f"units/{self.unit_id}/current/engine").get()
@@ -551,6 +582,7 @@ class EngineSupervisor:
                 v = d.get("motor_volts")
                 if isinstance(v, (int, float)):
                     telem["motor_volts"] = float(v)
+                telem["charging"] = d.get("charging") is True
         except Exception:
             pass
         return state, telem

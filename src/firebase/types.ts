@@ -50,10 +50,19 @@ export interface TelemetrySnapshot {
 
   // Output state derived from the LCD
   dc_active: boolean;              // DC outlet button enabled
-  ac_active: boolean;              // AC inverter on (orange outlet glyph on the LCD)
+  ac_active: boolean;              // AC inverter on. False whenever charging — the LCD sets the
+                                   // same bit for AC input, so it is only read while outputting.
   output_mode: 'AC' | 'DC' | 'AC+DC' | 'off';
-  output_watts: number | null;     // current draw in watts (null if any digit unmapped)
+  output_watts: number | null;     // current draw in watts (null if any digit unmapped, and
+                                   // always null while charging: the WATTS legend is unlit)
   time_to_empty_minutes: number | null;  // remaining runtime, null when LCD shows the 99:59 placeholder
+
+  // Wall-charger state. The LCD reuses one HH:MM field for both estimates and
+  // relabels it, so exactly one of time_to_empty/time_to_full is ever non-null.
+  // Optional because a Pi running a decoder older than 2026-07-28 omits them
+  // entirely — treat absent as "not charging" rather than as unknown.
+  charging?: boolean;                     // wall charger connected and drawing
+  time_to_full_minutes?: number | null;   // charge ETA, null unless charging
 
   // Optional / future
   bmsFaults?: string[];            // active fault codes (empty until LCD fault icons are mapped)
