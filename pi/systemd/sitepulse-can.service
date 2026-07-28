@@ -5,6 +5,14 @@ After=network.target
 # driver creates the netdev at boot; this unit just brings the link up at the
 # VESC's bitrate so listeners and senders can attach. Restart-safe because
 # we down the interface first, swallowing failure on a cold boot.
+#
+# can0 only exists if the mcp2515 dtoverlay is in /boot/firmware/config.txt
+# (and the Pi has rebooted since). Enabling SPI alone is NOT enough — this is
+# the step that stalled UNIT-002 during provisioning.
+#
+# Runs as root by design: bringing a netdev up needs CAP_NET_ADMIN, which the
+# unprivileged `sitepulse` user running the other two services does not have.
+# Nothing unit-specific lives here, so this file is already fleet-identical.
 
 [Service]
 Type=oneshot

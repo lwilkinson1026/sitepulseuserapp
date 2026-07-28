@@ -1,0 +1,25 @@
+# SitePulse log rotation  →  install as /etc/logrotate.d/sitepulse
+#
+# Before this existed the services appended to ~/sitepulse/*.log forever with
+# nothing trimming them. On a Pi with an SD card that is a slow disk-full bug,
+# not a tidiness issue.
+
+/var/log/sitepulse/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+
+    # REQUIRED, do not switch to create/mv rotation. systemd's
+    # StandardOutput=append: holds the file descriptor open for the life of
+    # the service. Renaming the file out from under it would leave the
+    # service writing happily into the rotated inode, so the "current" log
+    # would silently stop growing until the next restart. copytruncate
+    # keeps the same inode and truncates in place.
+    copytruncate
+
+    su sitepulse sitepulse
+    create 0640 sitepulse sitepulse
+}
