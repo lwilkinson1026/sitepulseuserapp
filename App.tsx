@@ -39,6 +39,7 @@ import {
   useFonts as useJetBrains,
 } from '@expo-google-fonts/jetbrains-mono';
 import { AuthProvider } from './src/hooks/AuthContext';
+import { ActiveUnitProvider } from './src/hooks/ActiveUnitContext';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { ensureFirebase } from './src/firebase/config';
 import { colors } from './src/theme';
@@ -69,7 +70,10 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar style="light" />
       <AuthProvider>
-        <RootNavigator />
+        {/* Inside AuthProvider: unit resolution keys off the signed-in uid. */}
+        <ActiveUnitProvider>
+          <RootNavigator />
+        </ActiveUnitProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

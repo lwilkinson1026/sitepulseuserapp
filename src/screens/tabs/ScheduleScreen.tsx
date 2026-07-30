@@ -21,6 +21,7 @@ import type {
 } from '../../firebase/types';
 import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
+import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
 // Phase C — engine recharge schedule.
 //
@@ -32,8 +33,6 @@ import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../the
 // the entire `windows` array. Tap a preset → it issues a charge.update with
 // a complete config patch. The "Custom" chip is reserved for the future
 // time-picker editor.
-
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 
 const DAY_LABELS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
@@ -122,12 +121,13 @@ const REASON_LABEL: Record<NonNullable<EngineState['reason']>, string> = {
 };
 
 export function ScheduleScreen() {
+  const { unitId } = useActiveUnit();
   const { user } = useAuth();
-  const chargeConfig = useUnitDoc<ChargeConfig>(DEV_UNIT_ID, 'config', 'charge');
+  const chargeConfig = useUnitDoc<ChargeConfig>(unitId, 'config', 'charge');
   // The supervisor's actual thresholds live here, not on config/charge —
   // ChargeConfig.socStart/Stop/Critical are legacy and unused by the Pi.
-  const engineConfig = useUnitDoc<EngineConfig>(DEV_UNIT_ID, 'config', 'engine');
-  const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
+  const engineConfig = useUnitDoc<EngineConfig>(unitId, 'config', 'engine');
+  const engineState = useUnitDoc<EngineState>(unitId, 'current', 'engine');
 
   // Stable derived values + ALL hook calls up-front so hook order is
   // consistent across renders (React's rules-of-hooks). The early loading
@@ -147,7 +147,7 @@ export function ScheduleScreen() {
   const loading =
     chargeConfig.loading || engineConfig.loading || engineState.loading;
 
-  if (!user || loading) {
+  if (!user || !unitId || loading) {
     return (
       <Screen>
         <View style={styles.center}>
@@ -170,7 +170,7 @@ export function ScheduleScreen() {
 
   const onToggleEnabled = (next: boolean) => {
     setEnabledOptimistic(next);
-    void updateChargeConfig(DEV_UNIT_ID, user.uid, { enabled: next });
+    void updateChargeConfig(unitId, user.uid, { enabled: next });
   };
 
   const onApplyPreset = (presetId: PresetId) => {
@@ -181,20 +181,20 @@ export function ScheduleScreen() {
     if (preset.patch.allowQuietOverride !== undefined) {
       setAllowQuietOverrideOptimistic(preset.patch.allowQuietOverride);
     }
-    void updateChargeConfig(DEV_UNIT_ID, user.uid, preset.patch);
+    void updateChargeConfig(unitId, user.uid, preset.patch);
   };
 
   const onToggleQuietOverride = (next: boolean) => {
     setAllowQuietOverrideOptimistic(next);
-    void updateChargeConfig(DEV_UNIT_ID, user.uid, { allowQuietOverride: next });
+    void updateChargeConfig(unitId, user.uid, { allowQuietOverride: next });
   };
 
   const onRunNow = () => {
-    void overrideEngine(DEV_UNIT_ID, user.uid, 'run_now');
+    void overrideEngine(unitId, user.uid, 'run_now');
   };
 
   const onStopEngine = () => {
-    void overrideEngine(DEV_UNIT_ID, user.uid, 'stop');
+    void overrideEngine(unitId, user.uid, 'stop');
   };
 
   return (
@@ -363,7 +363,7 @@ export function ScheduleScreen() {
           />
         </View>
 
-        <FigCaption number={3} label="Schedule" detail={DEV_UNIT_ID} />
+        <FigCaption number={3} label="Schedule" detail={unitId ?? undefined} />
       </ScrollView>
     </Screen>
   );
@@ -373,7 +373,14 @@ export function ScheduleScreen() {
 // with a small "≈ XX%" SoC approximation under it. Voltage is the source
 // of truth — the SoC translation is just user-friendly context.
 function ThresholdRow({ label, volts }: { label: string; volts: number }) {
-  const approxSoc = vescVoltsToSoc(volts);
+  // Reads the active unit rather than taking cellCount as a prop: this is
+  // always rendered inside ActiveUnitProvider, and the SoC translation is
+  // incidental context callers shouldn't need to know to supply. When the
+  // cell count is unknown the "≈ XX% SOC" line is simply omitted — the same
+  // pack voltage means very different things on a 14S vs 15S pack, so a
+  // guessed percentage would be confidently wrong.
+  const { unit } = useActiveUnit();
+  const approxSoc = vescVoltsToSoc(volts, { cellCount: unit?.cellCount });
   return (
     <View style={styles.thresholdRow}>
       <Text style={styles.thresholdKey}>{label}</Text>

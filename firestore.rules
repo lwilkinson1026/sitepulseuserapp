@@ -40,7 +40,26 @@ service cloud.firestore {
     // they are the owner. Client never writes — claim/release go through
     // Cloud Functions; lastSeen + telemetry come from the Pi.
     match /units/{unitId} {
-      allow read: if isOwnerOf(unitId);
+      // Checked against resource.data directly rather than through
+      // isOwnerOf()'s get(). Equivalent for a single-doc read — and cheaper,
+      // since it drops an extra billed document lookup — but it is also what
+      // makes this legal:
+      //
+      //   query(collection('units'), where('ownerId', '==', uid))
+      //
+      // On a `list`, Firestore has to prove up front that the query cannot
+      // return a document the rule would reject, and it does that by matching
+      // the query's filters against the rule. A get() indirection is opaque to
+      // that check, so the entire list was denied — leaving the app no way to
+      // discover which unit the signed-in user owns.
+      //
+      // Not a loosening: the predicate is still evaluated per document, so an
+      // *unfiltered* list of /units stays denied.
+      //
+      // Subcollections below keep isOwnerOf(). Their rules key off the parent
+      // unit rather than off fields of the documents being listed, so they are
+      // already verifiable and already work.
+      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
       allow write: if false;
 
       // Live telemetry. Read-only for the owner; written by the Pi.
