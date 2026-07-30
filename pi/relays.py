@@ -2,11 +2,23 @@
 Waveshare RPi Relay Board controller + SPST physical-override switch.
 
 Hardware:
-  - Waveshare RPi Relay Board (model D-1226 / original 3-channel),
-    BCM 26, 20, 13 (active-low). NOTE: the "RPi Relay Board (B)" model
-    uses BCM 5, 6, 13 instead — set the env vars below if you swap.
+  - A Waveshare RPi Relay Board, active-low. **The pin map differs per unit —
+    verify against the physical board before trusting it.**
+      UNIT-001: 3-channel D-1226, BCM 26 / 20 / 21  (matches the defaults below)
+      UNIT-002: 4-channel B-style, BCM 26 / 19 / 13  (+ BCM 6 as a 4th relay)
+    Override per unit with SITEPULSE_RELAY_<n>_PIN; see systemd/unit.env.example.
   - SPST toggle from BCM 17 to GND, internal pull-up enabled. Switch closed
     → light forced ON regardless of app/sentry. Switch open → app/auto wins.
+
+Diagnosing a relay that will not click (learned the hard way, 2026-07-30):
+a pad toggling `op dl|lo` ↔ `op dh|hi` under `pinctrl` proves only that the Pi
+drove the line. A pin wired to nothing looks exactly the same. To tell them
+apart, make it an input with an internal pull-DOWN — `pinctrl set <n> ip pd`:
+    stays `hi` → held up by the board's active-low input  → CONNECTED
+    reads `lo` → nothing on the other end                 → NOT on the board
+UNIT-002 shipped with channels 2 and 3 pointed at BCM 20/21, which its board
+does not use. Every relay.set "succeeded" into open air: no ignition kill, no
+cooling fans, and an engine.stop that reported success while the engine ran.
 
 Channel 1 is the security light by convention (overridable via
 `config/light.relayChannel` in Firestore).
@@ -19,9 +31,10 @@ Also exposes `start_override_watcher(db, unit_id)` — a one-shot launcher
 that spawns a polling thread to mirror the physical switch into Firestore.
 
 Env overrides:
-    SITEPULSE_RELAY_1_PIN / _2_PIN / _3_PIN   default 5 / 6 / 13
+    SITEPULSE_RELAY_1_PIN / _2_PIN / _3_PIN   default 26 / 20 / 21
     SITEPULSE_OVERRIDE_PIN                    default 17
     SITEPULSE_RELAY_ACTIVE_LOW                "1" (default) or "0"
+    SITEPULSE_RELAY_INVERT                    default "3" — see the note below
 """
 
 from __future__ import annotations

@@ -1,0 +1,51 @@
+[Unit]
+Description=SitePulse command listener (commands + servos/engine/supervisor/scheduler/sentry/streamer)
+After=network-online.target sitepulse-can.service
+Wants=network-online.target sitepulse-can.service
+# command_listener.py is the process that actually actuates hardware: it
+# watches the Firestore command queue and runs the background services
+# (servo driver, override-pin watcher, engine schedule, sentry, streamer,
+# engine supervisor). Wants= rather than Requires= on can0 for the same
+# reason as the publisher — a missing CAN bus should degrade the engine
+# path, not prevent the unit from accepting commands at all.
+#
+# NOTE: this unit was authored directly on each Pi and existed nowhere in
+# git until 2026-07-28, which is precisely how the two units drifted apart.
+
+[Service]
+Type=simple
+
+# Identical on every unit in the fleet. Everything that differs between units
+# lives in /etc/sitepulse/unit.env, so this file ships verbatim everywhere.
+User=sitepulse
+Group=sitepulse
+# See sitepulse-publisher.service for what each group is for. The listener
+# needs all of them: it drives the relay HAT and override pin (gpio), the
+# PCA9685 servos (i2c), the CAN HAT for engine crank (spi), and the camera
+# for sentry + streaming (video).
+SupplementaryGroups=gpio i2c spi video dialout
+WorkingDirectory=/opt/sitepulse/current
+
+# ── Fleet-wide defaults ───────────────────────────────────────────────────
+# Overridden by the EnvironmentFile= below, which systemd reads afterwards.
+Environment=SITEPULSE_SA=/etc/sitepulse/service-account.json
+
+# ── Per-unit config ───────────────────────────────────────────────────────
+# Not '-' prefixed on purpose: see the longer note in the publisher unit.
+# It matters even more here — a listener that fell back to the default
+# UNIT-001 would take another unit's commands and crank the wrong engine.
+EnvironmentFile=/etc/sitepulse/unit.env
+
+ExecStart=/usr/bin/python3 -u /opt/sitepulse/current/command_listener.py
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=append:/var/log/sitepulse/cmd_listener.log
+StandardError=inherit
+
+# See the publisher unit for why PrivateDevices/ProtectSystem are left off.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

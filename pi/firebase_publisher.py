@@ -106,6 +106,8 @@ def build_snapshot() -> Optional[dict]:
         "output_mode":           decoded["output_mode"],
         "output_watts":          decoded["output_watts"],
         "time_to_empty_minutes": decoded["time_to_empty_minutes"],
+        "time_to_full_minutes":  decoded["time_to_full_minutes"],
+        "charging":              decoded["charging"],
         "system_mode":           decoded["system_mode"],
         "lcd_frame_rate_hz":     frame_rate_hz,
         # Preserve the array shape the existing app expects.  Empty until
@@ -221,12 +223,21 @@ def main() -> None:
                         f"V={snap.get('motor_volts', '?')}  "
                         f"A={snap.get('motor_amps', '?')}"
                     )
+                # While charging the output row is dark, so mode/watts/ttempty
+                # are all None by design; showing the charge ETA instead keeps
+                # the log line informative rather than a row of blanks.
+                if snap["system_mode"] == "charging":
+                    flow = f"CHARGING  ttfull={snap['time_to_full_minutes']}m"
+                else:
+                    flow = (
+                        f"mode={snap['output_mode']}  "
+                        f"watts={snap['output_watts']}  "
+                        f"ttempty={snap['time_to_empty_minutes']}m"
+                    )
                 print(
                     f"[{stamp}] {UNIT_ID}  "
                     f"soc={snap['battery_soc']}%  "
-                    f"mode={snap['output_mode']}  "
-                    f"watts={snap['output_watts']}  "
-                    f"ttempty={snap['time_to_empty_minutes']}m  "
+                    f"{flow}  "
                     f"frames={stats.frames_decoded}  rate={snap['lcd_frame_rate_hz']}Hz"
                     f"{motor_summary}",
                     flush=True,

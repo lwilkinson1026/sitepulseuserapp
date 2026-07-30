@@ -16,8 +16,10 @@ glues the two together and publishes the result.
 Encoding notes (derived empirically — see ../docs not yet written):
 
   Reg 0x00, 0x01            battery percentage + battery icon + "%" symbol.
-                            Custom segment encoding, NOT 7-segment digits.
-                            We hold a lookup table; unknowns return None.
+                            Ordinary 7-segment digits sharing the watts
+                            segment map, shifted left one bit:
+                            `_WATTS_DIGITS[reg >> 1]`.  Reg 0x00 bit 0 is the
+                            hundreds "1"; reg 0x01 bit 0 is the "%" glyph.
 
   Reg 0x02, 0x03, 0x04, 0x11  watts digit (1000s, 100s, 10s, 1s respectively)
                             7-segment, position-specific bit mapping.
@@ -26,11 +28,33 @@ Encoding notes (derived empirically — see ../docs not yet written):
                             "thousands active" indicator.
 
   Reg 0x05 bit 0            "DC on" label segment (small DC indicator).
-  Reg 0x07 bit 0            "output mode active" (set for both AC and DC).
-  Reg 0x0B..0x0E            time-to-empty digits, HH:MM, left-to-right.
+  Reg 0x07 bit 0            LCD awake / panel driving its segments.  NOT
+                            "output active" — it is set while charging too,
+                            when nothing is being output at all.
+  Reg 0x07 bits 2+5 (0x24)  Charging from the wall.  Never seen in 51 frames
+                            across six discharge sessions, where reg 0x07 is
+                            only ever 0x00 (asleep) or 0x01 (awake).
+  Reg 0x0B..0x0E            HH:MM digits, left-to-right.  Which quantity they
+                            represent depends on the layout: time-to-empty
+                            while discharging, time-to-full while charging.
                             Bit 7 of reg 0x0C is the colon between the
-                            second and third digit.
-  Reg 0x0F, 0x10            label segments ("WATTS", "TIME TO EMPTY", "OUT").
+                            second and third digit; while charging bit 7 is
+                            set on *all four* digits and must be stripped.
+  Reg 0x0F bits 3+4 (0x18)  The output row ("OUT" / "WATTS" labels).  Lit
+                            whenever the unit is discharging, clear when it
+                            is asleep *or* charging — which makes this, not
+                            reg 0x07 bit 0, the real "output section" flag.
+  Reg 0x10 bit 3            Part of the same output-row label group as
+                            reg 0x0F.  Previously documented here as "LCD
+                            awake"; that is wrong — it is clear while
+                            charging, when the LCD is plainly awake.
+  Reg 0x10 bit 4            AC section active.  Set when the inverter is on
+                            (clear while ~950 W flows on DC, set while DC is
+                            also on, so it is AC-specific rather than a
+                            "load present" flag) — but ALSO set while
+                            charging from the wall, where it presumably
+                            marks the AC *input*.  Only meaningful when the
+                            output row above is lit.
 
 Anything not in our digit tables decodes as None with a warning attached
 so the publisher logs it and the scheduler stays safe (battery_soc=None
@@ -40,6 +64,18 @@ short-circuits the engine recharge loop into idle).
 from __future__ import annotations
 
 from typing import Optional, TypedDict
+
+
+# ─── Flag masks ────────────────────────────────────────────────────────────
+
+# Reg 0x07 bits 2 and 5.  Set together the moment the wall charger is plugged
+# in (0x01 -> 0x25) and clear again when it comes out.  Derived 2026-07-28 on
+# UNIT-002; see the register map in the module docstring for the negative
+# control that makes this safe to key on.
+_CHARGING_MASK = 0x24
+
+# Reg 0x0F bits 3 and 4 — the "OUT"/"WATTS" legends, i.e. the output row.
+_OUTPUT_ROW_MASK = 0x18
 
 
 # ─── Digit tables ──────────────────────────────────────────────────────────
@@ -85,20 +121,101 @@ _WATTS_DIGITS = {
     0x7F: "8",
 }
 
-# Battery percentage uses a custom segment layout we have not yet fully
-# reverse engineered.  Add observed (reg0x00, reg0x01) pairs here as you
-# capture them.  Unknown pairs decode to None so the scheduler fails safe.
-_BATTERY_SOC_LOOKUP: dict[tuple[int, int], int] = {
-    (0xFE, 0xD7): 85,
-    (0xFE, 0x5D): 78,
-    (0x4A, 0xF7): 76,   # photographed during live session, IMG_5574
-    (0x4A, 0xD7): 73,   # confirmed during heater test in same session
-    (0x4A, 0xDB): 72,   # photographed live, IMG_5578
-    (0x4A, 0xBB): 71,   # confirmed live via raw_frame_hex from Firestore
-    # As you observe more known percentages, append rows like:
-    #   (0xFE, 0x42): 70,
-    # The publisher logs every unknown pair so you can backfill this table.
+# Battery percentage.  This was long assumed to be an opaque custom layout
+# requiring a hand-built lookup table.  It is not: regs 0x00/0x01 are two
+# ordinary 7-segment digits using the *same* segment wiring as the watts
+# digits, shifted left by one bit.
+#
+#     reg 0x00:  bits 1-7 = tens digit      bit 0 = hundreds "1"
+#     reg 0x01:  bits 1-7 = ones digit      bit 0 = the "%" symbol
+#
+# So `_WATTS_DIGITS[reg >> 1]` yields the digit directly, and 100% falls out
+# as reg00 = 0xEF -> hundreds bit set + "0", reg01 = 0xEF -> "0"  =>  "100".
+#
+# Derived 2026-07-28 on UNIT-002 from 14 consecutive states captured during a
+# 1000 W discharge (lcd_calibrate.py session 20260728-171342), cross-checked
+# against camera ground truth.  All ten digits reproduce _WATTS_DIGITS exactly
+# and the map holds across two decades — 0x4B decodes as "7" at both 97% and
+# 87% — so this is a real decode, not a curve fit.
+#
+# Retained below purely as a regression fixture.  NOTE: four entries in the
+# original hand-mapped table were wrong, and were internally inconsistent
+# (it required 0xD7 to mean both "3" and "5").  Corrected values, with the
+# originally recorded value in the comment:
+_BATTERY_SOC_VERIFIED: dict[tuple[int, int], int] = {
+    (0xEF, 0xEF): 100,  # camera + Saleae agreed, UNIT-002 bench
+    (0xDE, 0x4B): 97,   # ─┐
+    (0xDE, 0xF7): 96,   #  │
+    (0xDE, 0xD7): 95,   #  │ 1000 W discharge, monotonic, camera-confirmed
+    (0xDE, 0x5D): 94,   #  │ each step down photographed
+    (0xDE, 0xDB): 93,   #  │
+    (0xDE, 0xBB): 92,   #  │
+    (0xDE, 0x49): 91,   #  │
+    (0xDE, 0xEF): 90,   #  │
+    (0xFE, 0xDF): 89,   #  │
+    (0xFE, 0xFF): 88,   #  │
+    (0xFE, 0x4B): 87,   # ─┘
+    (0xFE, 0xD7): 85,   # original hand-mapped entry — correct
+    (0xFE, 0x5D): 84,   # was recorded 78 — off by 6
+    (0x4A, 0xF7): 76,   # original hand-mapped entry — correct
+    (0x4A, 0xD7): 75,   # was recorded 73
+    (0x4A, 0xDB): 73,   # was recorded 72
+    (0x4A, 0xBB): 72,   # was recorded 71
 }
+
+
+def _decode_battery_soc(hi: int, lo: int, warnings: list[str]) -> Optional[int]:
+    """Decode the battery percentage from regs 0x00 (tens) and 0x01 (ones).
+
+    Returns None on an unrecognised segment pattern so the scheduler fails
+    safe — battery_soc=None short-circuits the engine recharge loop to idle.
+    """
+    tens = _WATTS_DIGITS.get((hi >> 1) & 0x7F)
+    ones = _WATTS_DIGITS.get((lo >> 1) & 0x7F)
+    if tens is None or ones is None:
+        warnings.append(
+            f"undecodable SoC segments: reg00=0x{hi:02X} reg01=0x{lo:02X}"
+        )
+        return None
+
+    hundreds = bool(hi & 0x01)
+    tens, ones = tens.strip(), ones.strip()
+
+    # A fully blank field is the LCD asleep or a torn frame, not a reading.
+    # This is the common case (the panel sleeps on its own), so it returns
+    # None quietly rather than spamming a warning on every frame.
+    if not tens and not ones and not hundreds:
+        return None
+
+    # The ones digit is always displayed on a real reading; the tens digit
+    # blanks only below 10%.  Anything else is a partially-latched frame —
+    # reject it rather than emit a plausible-looking number, because a wrong
+    # SoC silently drives the engine recharge scheduler.
+    if not ones or (hundreds and not tens):
+        warnings.append(
+            f"partial SoC frame: reg00=0x{hi:02X} reg01=0x{lo:02X} "
+            f"(tens={tens or 'blank'!s} ones={ones or 'blank'!s})"
+        )
+        return None
+
+    try:
+        value = int(("1" if hundreds else "") + tens + ones)
+    except ValueError:
+        warnings.append(f"nonsense SoC digits from 0x{hi:02X},0x{lo:02X}")
+        return None
+
+    # The display tops out at 100, so the hundreds segment can only ever
+    # accompany "00".  Any other 3-digit combination is a decode error.
+    if hundreds and value != 100:
+        warnings.append(
+            f"impossible SoC {value} (hundreds bit set) "
+            f"from 0x{hi:02X},0x{lo:02X}"
+        )
+        return None
+    if not 0 <= value <= 100:
+        warnings.append(f"SoC {value} out of range from 0x{hi:02X},0x{lo:02X}")
+        return None
+    return value
 
 
 # ─── Public types ──────────────────────────────────────────────────────────
@@ -111,7 +228,9 @@ class DecodedFrame(TypedDict):
     output_mode:           str             # "AC", "DC", "AC+DC", "off" (derived for app convenience)
     output_watts:          Optional[int]   # current draw, None if any digit unmapped
     time_to_empty_minutes: Optional[int]   # parsed HH:MM, None if unmapped or colon missing
-    system_mode:           str             # "discharging", "idle" (matches scheduler.py)
+    time_to_full_minutes:  Optional[int]   # charge ETA, None unless charging
+    charging:              bool            # wall charger connected and drawing
+    system_mode:           str             # "charging", "discharging", "idle" (matches scheduler.py)
     warnings:              list[str]       # human-readable list of unmapped bytes
 
 
@@ -127,6 +246,49 @@ def _watts_digit(byte: int, warnings: list[str], position: str) -> Optional[str]
         warnings.append(f"unknown watts digit at {position}: byte=0x{byte:02X} stripped=0x{base:02X}")
         return None
     return digit
+
+
+def _decode_hhmm(
+    regs: list[int],
+    warnings: list[str],
+    label: str,
+    strip_all: bool = False,
+) -> Optional[int]:
+    """Decode the HH:MM field at regs 0x0B..0x0E into minutes.
+
+    The same four digits serve time-to-empty while discharging and
+    time-to-full while charging, so the parsing lives here once.
+
+    `strip_all` selects the charging layout, where bit 7 is set on all four
+    digits rather than only on reg 0x0C.  Verified against the panel: regs
+    F7 F7 DD FB photograph as "00:29" and F7 F7 DB 92 as "00:31", both of
+    which only decode once bit 7 is stripped from every digit.
+    """
+    # The colon lives on reg 0x0C in both layouts.  In the charging layout the
+    # other three bit-7s are the layout marker rather than colons, so they are
+    # stripped for their digit value but discarded as colon evidence.
+    d1, _     = _time_digit(regs[0x0B], strip_all, warnings, f"{label}-1")
+    d2, colon = _time_digit(regs[0x0C], True,      warnings, f"{label}-2")
+    d3, _     = _time_digit(regs[0x0D], strip_all, warnings, f"{label}-3")
+    d4, _     = _time_digit(regs[0x0E], strip_all, warnings, f"{label}-4")
+    if None in (d1, d2, d3, d4):
+        return None
+    if not colon:
+        warnings.append(
+            f"{label} colon (reg 0x0C bit 7) not set; got 0x{regs[0x0C]:02X}"
+        )
+        return None
+    try:
+        hours   = int(d1 + d2)
+        minutes = int(d3 + d4)
+    except ValueError:
+        return None
+    # The BMS shows "99:59" as a placeholder when it cannot compute a
+    # meaningful estimate (load too small, or charge just started).  Surface
+    # that as None instead of an absurd 5999-minute value.
+    if hours == 99 and minutes == 59:
+        return None
+    return hours * 60 + minutes
 
 
 def _time_digit(byte: int, allow_colon: bool, warnings: list[str], position: str) -> tuple[Optional[str], bool]:
@@ -160,40 +322,93 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     warnings: list[str] = []
 
     # ── battery percentage ────────────────────────────────────────────────
-    soc_key = (regs[0x00], regs[0x01])
-    battery_soc = _BATTERY_SOC_LOOKUP.get(soc_key)
-    if battery_soc is None:
-        warnings.append(
-            f"unknown SoC bytes: reg00=0x{regs[0x00]:02X} reg01=0x{regs[0x01]:02X} "
-            f"— add to _BATTERY_SOC_LOOKUP"
-        )
+    battery_soc = _decode_battery_soc(regs[0x00], regs[0x01], warnings)
 
     # ── output mode (DC / AC / both / off) ────────────────────────────────
     # bit 7 of reg 0x11 is the DC outlet button indicator (set when DC is
     # toggled on, independent of whether the AC outlet is also enabled).
-    # AC active is detected by ANY watts being drawn that isn't DC's draw —
-    # but since we don't easily distinguish, we currently use reg 0x07 bit 0
-    # as "some output active" and infer AC by elimination.  This is imperfect
-    # when both are on; future work: identify the AC-specific bit.
-    output_active = bool(regs[0x07] & 0x01)
-    dc_active     = bool(regs[0x11] & 0x80)
-    # If output is active but DC isn't, AC must be.  When both could be on,
-    # this still flags AC correctly as long as DC isn't the only output.
-    ac_active     = output_active and not dc_active
-    # When both are on we currently can't see it from one byte; the publisher
-    # log + raw_frame_hex helps refine this as more states are observed.
+    #
+    # AC is reg 0x10 bit 4 — the orange NEMA-outlet glyph on the LCD, which
+    # the panel lights whenever the inverter is on.  Identified 2026-07-28 on
+    # UNIT-002 by photographing the display across an AC off→on toggle while
+    # the LCD stayed awake, which is the one state the earlier attempts never
+    # isolated (every previous "AC off" sample was really the whole display
+    # asleep, so every candidate bit correlated equally).
+    #
+    # It is genuinely AC-specific rather than a generic "load present" flag:
+    # in session 20260728-165657 roughly 950 W flows on DC with this bit
+    # CLEAR, and in session 20260728-171342 it is SET while DC is also on.
+    #
+    # Do not confuse it with bit 3 of the same register.  That bit was once
+    # documented here as "LCD awake", which is wrong: it stays CLEAR through
+    # an entire wall charge while the panel is plainly lit.  Its real meaning
+    # is still unknown, so nothing keys on it.
+    #
+    # "LCD awake" is reg 0x07 bit 0, below.  It only means the panel is
+    # driving its segments — it is set while charging too, so it is not an
+    # output flag (see _OUTPUT_ROW_MASK for the one that is).
+    display_awake = bool(regs[0x07] & 0x01)
 
-    if not output_active:
+    # Charging from the wall.  Reg 0x07 has never been anything but 0x00
+    # (asleep) or 0x01 (awake) in 51 saved frames across six discharge
+    # sessions; plugging the charger in takes it to 0x25.  Both new bits are
+    # required rather than either one, because they have only ever been
+    # observed moving together and demanding both fails safe.
+    charging = display_awake and (regs[0x07] & _CHARGING_MASK) == _CHARGING_MASK
+
+    # The output row.  This is the flag that actually distinguishes "putting
+    # power out" from "taking power in": reg 0x0F is 0x18 in every single
+    # discharge frame we have, and 0x00 both when the panel sleeps and while
+    # it charges.  Photographed directly — during a charge the "OUT" and
+    # "WATTS" legends are unlit silkscreen while the HH:MM field is still
+    # emissive.
+    output_section = display_awake and not charging and bool(regs[0x0F] & _OUTPUT_ROW_MASK)
+
+    # Both outlet flags are only meaningful while the output row is lit.
+    # During the wake/sleep transition the panel latches one of them a frame
+    # or two out of step with the rest, and while charging reg 0x10 bit 4 is
+    # set to mark the AC *input*.  Gating on output_section keeps
+    # ac_active/dc_active consistent with output_mode, so the app can never
+    # be handed mode="off" or system_mode="charging" alongside ac_active=True.
+    dc_active     = output_section and bool(regs[0x11] & 0x80)
+    ac_active     = output_section and bool(regs[0x10] & 0x10)
+
+    if charging and (regs[0x0F] or not any(regs[0x08:0x0B])):
+        # Three independent things move when the charger goes in: reg 0x07
+        # gains 0x24, reg 0x0F drops to 0x00, and regs 0x08-0x0A come alive
+        # (they are 0x00 in every discharge frame ever captured).  If they
+        # disagree we are looking at a layout this decoder has not seen, so
+        # say so rather than quietly trusting one bit pair.
+        warnings.append(
+            f"charging flag set but layout disagrees: "
+            f"0x0F=0x{regs[0x0F]:02X} 0x08-0x0A="
+            f"{regs[0x08]:02X},{regs[0x09]:02X},{regs[0x0A]:02X}"
+        )
+
+    # A frame can show AC or DC set while the output row is clear during the
+    # display's wake/sleep transition.  Treat that as off rather than
+    # reporting a mode built from a half-latched frame.
+    if not output_section:
         output_mode = "off"
     elif dc_active and ac_active:
         output_mode = "AC+DC"
     elif dc_active:
         output_mode = "DC"
-    else:
+    elif ac_active:
         output_mode = "AC"
+    else:
+        # Display awake, output label lit, but neither outlet flagged. Real
+        # and routine: the panel sits here after AC is switched off but
+        # before it sleeps.  Previously this fell through to "AC", which is
+        # exactly backwards.
+        output_mode = "off"
 
     # ── watts (1-4 digits across reg 0x02, 0x03, 0x04, 0x11) ──────────────
-    if output_mode == "off":
+    # Gated on the output row, not merely on the display being awake.  While
+    # charging the WATTS legend is dark and these registers hold 00/80/80/xx,
+    # which used to decode to a confident-looking "6 W" of output that was
+    # entirely fictional.
+    if not output_section:
         output_watts: Optional[int] = None
     else:
         d_thousands = _watts_digit(regs[0x02], warnings, "1000s")
@@ -207,36 +422,34 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
             digits_str = (d_thousands + d_hundreds + d_tens + d_ones).lstrip(" ")
             output_watts = int(digits_str) if digits_str else 0
 
-    # ── time-to-empty (HH:MM across reg 0x0B, 0x0C+colon, 0x0D, 0x0E) ─────
-    if output_mode == "off":
-        time_to_empty_minutes: Optional[int] = None
-    else:
-        d1, _     = _time_digit(regs[0x0B], False, warnings, "time-1")
-        d2, colon = _time_digit(regs[0x0C], True,  warnings, "time-2")
-        d3, _     = _time_digit(regs[0x0D], False, warnings, "time-3")
-        d4, _     = _time_digit(regs[0x0E], False, warnings, "time-4")
-
-        if None in (d1, d2, d3, d4) or not colon:
-            time_to_empty_minutes = None
-            if not colon and not warnings:
-                warnings.append(f"time colon (reg 0x0C bit 7) not set; got 0x{regs[0x0C]:02X}")
-        else:
-            try:
-                hours   = int(d1 + d2)
-                minutes = int(d3 + d4)
-                time_to_empty_minutes = hours * 60 + minutes
-                # The BMS shows "99:59" as a placeholder when load is too
-                # small to compute remaining time.  Surface that as None
-                # instead of an absurd 5999-minute value.
-                if hours == 99 and minutes == 59:
-                    time_to_empty_minutes = None
-            except ValueError:
-                time_to_empty_minutes = None
+    # ── HH:MM (regs 0x0B, 0x0C+colon, 0x0D, 0x0E) ─────────────────────────
+    # One field on the glass, two meanings.  The panel relabels it
+    # "TIME TO FULL" while charging, so route it to whichever output field
+    # matches the current layout and leave the other None — reporting a
+    # charge ETA as "time to empty" would be worse than reporting nothing.
+    time_to_empty_minutes: Optional[int] = None
+    time_to_full_minutes: Optional[int] = None
+    if charging:
+        time_to_full_minutes = _decode_hhmm(regs, warnings, "time-to-full", strip_all=True)
+    elif output_section:
+        time_to_empty_minutes = _decode_hhmm(regs, warnings, "time-to-empty")
 
     # ── system_mode (matches the field scheduler.py and the app expect) ──
-    # We can't yet detect charging from the LCD bytes (no charging-input
-    # captured yet).  Discharging = any output active.  Otherwise idle.
-    if output_mode in ("AC", "DC"):
+    # Charging wins over everything: a unit on the wall charger is not idle,
+    # and it is emphatically not discharging.  Before this existed the
+    # charging layout decoded as system_mode="discharging" on output_mode="AC"
+    # with a fictional 6 W load, which is precisely the reading that would
+    # tell the supervisor to fire the engine to recharge a battery that is
+    # already charging from mains.
+    #
+    # "AC+DC" was missing from this test, so a unit discharging on both
+    # outlets reported "idle" — which the scheduler reads as "safe to leave
+    # the engine off".  It had never fired before because ac_active could not
+    # previously be true at the same time as dc_active.  Making AC detection
+    # work is what exposed it.
+    if charging:
+        system_mode = "charging"
+    elif output_mode in ("AC", "DC", "AC+DC"):
         system_mode = "discharging"
     else:
         system_mode = "idle"
@@ -248,6 +461,8 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
         output_mode=output_mode,
         output_watts=output_watts,
         time_to_empty_minutes=time_to_empty_minutes,
+        time_to_full_minutes=time_to_full_minutes,
+        charging=charging,
         system_mode=system_mode,
         warnings=warnings,
     )
