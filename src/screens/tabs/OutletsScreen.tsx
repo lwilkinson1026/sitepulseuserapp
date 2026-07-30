@@ -20,6 +20,7 @@ import type {
   RelaysState,
 } from '../../firebase/types';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
+import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
 // Phase B — 3-channel Waveshare RPi Relay Board (B). Channel 1 is the
 // security light; channels 2 and 3 are user-labeled aux outputs.
@@ -29,8 +30,6 @@ import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../the
 // (pi/relays.py) mirrors the physical override switch into `current/light`
 // so we can disable the in-app toggle when the hardware switch is forcing on.
 
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
-
 type LightMode = 'off' | 'on' | 'auto';
 const LIGHT_MODES: LightMode[] = ['off', 'on', 'auto'];
 // Aux channels get the full off/on/auto selector, except the spark channel
@@ -39,13 +38,14 @@ const RELAY_MODES: LightMode[] = ['off', 'on', 'auto'];
 const RELAY_MODES_NO_AUTO: LightMode[] = ['off', 'on'];
 
 export function OutletsScreen() {
+  const { unitId } = useActiveUnit();
   const { user } = useAuth();
 
-  const lightConfig = useUnitDoc<LightConfig>(DEV_UNIT_ID, 'config', 'light');
-  const relaysConfig = useUnitDoc<RelaysConfig>(DEV_UNIT_ID, 'config', 'relays');
-  const lightState = useUnitDoc<LightState>(DEV_UNIT_ID, 'current', 'light');
-  const relaysState = useUnitDoc<RelaysState>(DEV_UNIT_ID, 'current', 'relays');
-  const engineConfig = useUnitDoc<EngineConfig>(DEV_UNIT_ID, 'config', 'engine');
+  const lightConfig = useUnitDoc<LightConfig>(unitId, 'config', 'light');
+  const relaysConfig = useUnitDoc<RelaysConfig>(unitId, 'config', 'relays');
+  const lightState = useUnitDoc<LightState>(unitId, 'current', 'light');
+  const relaysState = useUnitDoc<RelaysState>(unitId, 'current', 'relays');
+  const engineConfig = useUnitDoc<EngineConfig>(unitId, 'config', 'engine');
 
   // Derived values come before any conditional return so hook order stays
   // stable across renders (React's rules-of-hooks).
@@ -87,7 +87,7 @@ export function OutletsScreen() {
 
   // Don't render any of the cards before we have a uid — the command issuers
   // need it. If the screen is mounted before auth resolves, show a spinner.
-  if (!user || loading) {
+  if (!user || !unitId || loading) {
     return (
       <Screen>
         <View style={styles.center}>
@@ -106,12 +106,12 @@ export function OutletsScreen() {
   const onLightMode = (mode: LightMode) => {
     if (overrideActive) return; // hardware switch wins; UI is read-only
     setChannelMode[lightChannelKey](mode);
-    void setLight(DEV_UNIT_ID, user.uid, mode);
+    void setLight(unitId, user.uid, mode);
   };
 
   const onRelayMode = (channel: 1 | 2 | 3, mode: LightMode) => {
     setChannelMode[String(channel) as '1' | '2' | '3'](mode);
-    void setRelay(DEV_UNIT_ID, user.uid, channel, mode);
+    void setRelay(unitId, user.uid, channel, mode);
   };
 
   return (
@@ -253,7 +253,7 @@ export function OutletsScreen() {
           );
         })}
 
-        <FigCaption number={2} label="Outputs" detail={DEV_UNIT_ID} />
+        <FigCaption number={2} label="Outputs" detail={unitId ?? undefined} />
       </ScrollView>
     </Screen>
   );

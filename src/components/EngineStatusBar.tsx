@@ -30,13 +30,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useUnitDoc } from '../hooks/useUnitDoc';
+import { useActiveUnit } from '../hooks/ActiveUnitContext';
 import { EngineState, EngineMachineState, TelemetrySnapshot } from '../firebase/types';
 import { colors, fonts, motion, spacing } from '../theme';
-
-// Match the convention used in screens — read the dev unit from env,
-// fall back to UNIT-001 for bench testing. Will swap to a paired-unit
-// context once the pair flow lands.
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 
 // Pole pairs for the starter-generator motor — used to convert the eRPM
 // field from VESC STATUS_1 into mechanical RPM that's meaningful to a
@@ -128,16 +124,25 @@ function metricFor(
 
 interface EngineStatusBarProps {
   onPress?: () => void;
-  // Allow callers to override the unit; defaults to DEV_UNIT_ID.
-  unitId?: string;
+  /**
+   * Override the unit shown. Defaults to the signed-in user's active unit.
+   * Previously defaulted to a build-time env constant, which meant this bar
+   * subscribed to UNIT-001 for every user regardless of what they own.
+   */
+  unitId?: string | null;
   style?: ViewStyle;
 }
 
 export function EngineStatusBar({
   onPress,
-  unitId = DEV_UNIT_ID,
+  unitId: unitIdProp,
   style,
 }: EngineStatusBarProps) {
+  // `unitIdProp === undefined` means "not specified, use the active unit".
+  // An explicit null means "no unit yet" and correctly subscribes to nothing.
+  const { unitId: activeUnitId } = useActiveUnit();
+  const unitId = unitIdProp === undefined ? activeUnitId : unitIdProp;
+
   const engineDoc = useUnitDoc<EngineState>(unitId, 'current', 'engine');
   const snapDoc = useUnitDoc<TelemetrySnapshot>(unitId, 'current', 'snapshot');
 

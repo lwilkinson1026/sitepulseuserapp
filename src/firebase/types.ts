@@ -29,6 +29,17 @@ export interface UnitDoc {
   geofence?: { lat: number; lng: number; radiusMeters: number };
   lastSeen: Timestamp | null;
   regionTimezone: string;          // IANA tz, e.g. "America/Denver"
+  /**
+   * Series cell count of this unit's LiFePO4 pack. UNIT-001 is 15S, UNIT-002
+   * is 14S — so pack voltage alone cannot be interpreted without this. 49.5 V
+   * is a full 14S pack and a half-empty 15S one.
+   *
+   * Optional because it postdates the units already in Firestore. Consumers
+   * must treat "missing" as "no SOC estimate available" rather than assuming a
+   * default; guessing wrong reads a full pack as half empty (see
+   * src/lib/voltageSoc.ts).
+   */
+  cellCount?: number;
 }
 
 // VESC Harmony 16: 16 cell voltages, multiple temperature sensors.

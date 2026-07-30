@@ -36,6 +36,9 @@ scripts/service-account.json
 **/*-service-account.json
 **/firebase-adminsdk-*.json
 
+# Claude Code scratch state (agent worktrees, local session files)
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

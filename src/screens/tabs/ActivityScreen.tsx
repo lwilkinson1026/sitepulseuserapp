@@ -11,12 +11,11 @@ import { useAuth } from '../../hooks/AuthContext';
 import { useUnitEvents, type EventEntry } from '../../hooks/useUnitEvents';
 import type { EventKind } from '../../firebase/types';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
+import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
 // Reverse-chronological event log backed by units/{unitId}/events.
 // The Pi and cloud functions append here; we render the last N with the
 // same formatting the Sentry tab uses for motion rows.
-
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
 
 // Display labels for each EventKind. Kept here (rather than in types.ts)
 // because mapping is purely a presentation concern.
@@ -102,8 +101,9 @@ function formatTs(event: EventEntry): string {
 }
 
 export function ActivityScreen() {
+  const { unitId } = useActiveUnit();
   const { signOutNow, user } = useAuth();
-  const events = useUnitEvents(DEV_UNIT_ID, { pageSize: 50 });
+  const events = useUnitEvents(unitId, { pageSize: 50 });
 
   return (
     <Screen>
@@ -118,7 +118,7 @@ export function ActivityScreen() {
         </View>
 
         <View style={styles.fuel}>
-          <FuelPanel unitId={DEV_UNIT_ID} />
+          <FuelPanel unitId={unitId} />
         </View>
 
         <View style={styles.listHeader}>
@@ -160,7 +160,7 @@ export function ActivityScreen() {
         </View>
 
         <View style={styles.footer}>
-          <FigCaption number={5} label="Activity" detail={DEV_UNIT_ID} />
+          <FigCaption number={5} label="Activity" detail={unitId ?? undefined} />
         </View>
       </ScrollView>
     </Screen>

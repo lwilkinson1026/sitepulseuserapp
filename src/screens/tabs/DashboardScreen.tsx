@@ -17,15 +17,14 @@ import {
 import { confirm } from '../../lib/confirm';
 import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
+import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
 // Firestore. The Pi overwrites that doc every 2–5 s; we render whatever
 // arrives and reflect staleness via the LIVE / STALE / OFFLINE eyebrow.
 //
-// Unit ID is hardcoded for now — replaced with the owner's claimed unit
-// once the pair flow lands. Override via EXPO_PUBLIC_DEV_UNIT_ID for testing.
-
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
+// The unit shown comes from useActiveUnit(), which resolves the signed-in
+// user's owned unit from Firestore. It is no longer a build-time constant.
 
 // Engine controls (Start / Stop / Charge / Crank) live behind this flag.
 // They expose tuning + bench-test surface that doesn't belong on a regular
@@ -99,12 +98,19 @@ function TuneButton({
 }
 
 export function DashboardScreen() {
-  const { loading, snapshot, staleness, error } = useUnitTelemetry(DEV_UNIT_ID);
+  const {
+    unitId,
+    unit,
+    loading: unitLoading,
+    hasNoUnits,
+    error: unitError,
+  } = useActiveUnit();
+  const { loading, snapshot, staleness, error } = useUnitTelemetry(unitId);
   // Subscribe to the Pi-published engine runtime state so we can flip the
   // charging-input tile on only when the regen loop is actively running.
   // Same doc the ScheduleScreen reads — the Pi merges scheduler and runtime
   // fields together, so this read may contain both shapes.
-  const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
+  const engineState = useUnitDoc<EngineState>(unitId, 'current', 'engine');
   const { user } = useAuth();
   // 'pending' covers the brief window between tap and Pi ack. We don't
   // round-trip the ack into here yet — just debounce by time to prevent
@@ -118,12 +124,17 @@ export function DashboardScreen() {
   // reads the ref / state set up here.
   const lcdMemRef = useRef<{ value: number; seenAt: number } | null>(null);
   const [smoothedVescSoc, setSmoothedVescSoc] = useState<number | null>(null);
+  const cellCount = unit?.cellCount;
   useEffect(() => {
     if (!snapshot) return;
-    const sample = vescVoltsToSoc(
-      snapshot.motor_volts,
-      snapshot.motor_amps_in,
-    );
+    // cellCount scales the per-cell SoC curve to this unit's pack. While it is
+    // still loading (or absent on an older unit doc) this returns null and the
+    // voltage fallback simply doesn't display, which is the right outcome —
+    // reading a full 14S pack against the 15S curve would show ~50 %.
+    const sample = vescVoltsToSoc(snapshot.motor_volts, {
+      cellCount,
+      ampsIn: snapshot.motor_amps_in,
+    });
     if (sample === null) return;
     setSmoothedVescSoc((prev) =>
       prev === null
@@ -132,13 +143,16 @@ export function DashboardScreen() {
             VESC_SOC_EMA_ALPHA * sample + (1 - VESC_SOC_EMA_ALPHA) * prev,
           ),
     );
-  }, [snapshot]);
+    // cellCount belongs here: the unit doc resolves a beat after the first
+    // telemetry snapshot, so without it this closure keeps the initial
+    // `undefined` and the SoC estimate stays blank until the next snapshot.
+  }, [snapshot, cellCount]);
 
   const onWakePress = async () => {
-    if (!user || wakeBusy) return;
+    if (!user || !unitId || wakeBusy) return;
     setWakeBusy(true);
     try {
-      await wakeLcd(DEV_UNIT_ID, user.uid);
+      await wakeLcd(unitId, user.uid);
     } catch (e) {
       // Surface via console; no in-screen error UI for a one-off bench
       // action. If this becomes user-facing, lift into a toast.
@@ -152,10 +166,10 @@ export function DashboardScreen() {
   };
 
   const onAcPress = async () => {
-    if (!user || acBusy) return;
+    if (!user || !unitId || acBusy) return;
     setAcBusy(true);
     try {
-      await toggleAc(DEV_UNIT_ID, user.uid);
+      await toggleAc(unitId, user.uid);
     } catch (e) {
       console.warn('[dashboard] toggleAc failed', e);
     } finally {
@@ -170,7 +184,7 @@ export function DashboardScreen() {
   const [startBusy, setStartBusy] = useState(false);
 
   const onCrankPress = async () => {
-    if (!user || crankBusy) return;
+    if (!user || !unitId || crankBusy) return;
     const ok = await confirm({
       title: 'Crank Engine?',
       message:
@@ -183,7 +197,7 @@ export function DashboardScreen() {
     if (!ok) return;
     setCrankBusy(true);
     try {
-      await crankEngine(DEV_UNIT_ID, user.uid);
+      await crankEngine(unitId, user.uid);
     } catch (e) {
       console.warn('[dashboard] crankEngine failed', e);
     } finally {
@@ -195,7 +209,7 @@ export function DashboardScreen() {
   const [stopBusy, setStopBusy] = useState(false);
 
   const onChargePress = async () => {
-    if (!user || chargeBusy) return;
+    if (!user || !unitId || chargeBusy) return;
     const ok = await confirm({
       title: 'Begin Charging?',
       message:
@@ -207,7 +221,7 @@ export function DashboardScreen() {
     if (!ok) return;
     setChargeBusy(true);
     try {
-      await chargeEngine(DEV_UNIT_ID, user.uid);
+      await chargeEngine(unitId, user.uid);
     } catch (e) {
       console.warn('[dashboard] chargeEngine failed', e);
     } finally {
@@ -218,7 +232,7 @@ export function DashboardScreen() {
   };
 
   const onStopPress = async () => {
-    if (!user || stopBusy) return;
+    if (!user || !unitId || stopBusy) return;
     const ok = await confirm({
       title: 'Stop Engine?',
       message:
@@ -230,7 +244,7 @@ export function DashboardScreen() {
     if (!ok) return;
     setStopBusy(true);
     try {
-      await stopEngine(DEV_UNIT_ID, user.uid);
+      await stopEngine(unitId, user.uid);
     } catch (e) {
       console.warn('[dashboard] stopEngine failed', e);
     } finally {
@@ -245,7 +259,7 @@ export function DashboardScreen() {
   // make the operator pause before loading the engine hard.
   const [tuneBusy, setTuneBusy] = useState(false);
   const onTunePress = async (delta: number) => {
-    if (!user || tuneBusy) return;
+    if (!user || !unitId || tuneBusy) return;
     const current = Math.round(engineState.data?.currentAmpsCommanded ?? 0);
     let next = current + delta;
     if (next < CHARGE_TUNE_MIN_AMPS) next = CHARGE_TUNE_MIN_AMPS;
@@ -268,7 +282,7 @@ export function DashboardScreen() {
 
     setTuneBusy(true);
     try {
-      await tuneCharge(DEV_UNIT_ID, user.uid, next);
+      await tuneCharge(unitId, user.uid, next);
     } catch (e) {
       console.warn('[dashboard] tuneCharge failed', e);
     } finally {
@@ -277,7 +291,7 @@ export function DashboardScreen() {
   };
 
   const onStartPress = async () => {
-    if (!user || startBusy) return;
+    if (!user || !unitId || startBusy) return;
     const ok = await confirm({
       title: 'Start Engine?',
       message:
@@ -290,7 +304,7 @@ export function DashboardScreen() {
     if (!ok) return;
     setStartBusy(true);
     try {
-      await startEngine(DEV_UNIT_ID, user.uid);
+      await startEngine(unitId, user.uid);
     } catch (e) {
       console.warn('[dashboard] startEngine failed', e);
     } finally {
@@ -301,12 +315,55 @@ export function DashboardScreen() {
     }
   };
 
+  // Unit resolution comes first, and each outcome gets its own state. Without
+  // these, a null unitId falls through to "NO TELEMETRY YET" below, which
+  // blames the generator for what is really "we don't know which generator
+  // yet" or "you don't have one".
+  if (unitLoading) {
+    return (
+      <Screen>
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.textMuted} />
+          <Text style={styles.connectLabel}>FINDING YOUR GENERATOR</Text>
+        </View>
+      </Screen>
+    );
+  }
+
+  if (unitError) {
+    return (
+      <Screen>
+        <View style={styles.center}>
+          <Text style={[styles.connectLabel, { color: colors.danger }]}>
+            CANNOT LOOK UP YOUR GENERATOR
+          </Text>
+          <Text style={styles.connectHint}>{unitError.message}</Text>
+          <Text style={styles.connectHint}>UID  ·  {user?.uid ?? 'NONE'}</Text>
+        </View>
+      </Screen>
+    );
+  }
+
+  if (hasNoUnits || !unitId) {
+    return (
+      <Screen>
+        <View style={styles.center}>
+          <Text style={styles.connectLabel}>NO GENERATOR LINKED</Text>
+          <Text style={styles.connectHint}>
+            This account isn&apos;t linked to a generator yet.
+          </Text>
+          <Text style={styles.connectHint}>UID  ·  {user?.uid ?? 'NONE'}</Text>
+        </View>
+      </Screen>
+    );
+  }
+
   if (loading) {
     return (
       <Screen>
         <View style={styles.center}>
           <ActivityIndicator color={colors.textMuted} />
-          <Text style={styles.connectLabel}>SUBSCRIBING  ·  {DEV_UNIT_ID}</Text>
+          <Text style={styles.connectLabel}>SUBSCRIBING  ·  {unitId}</Text>
         </View>
       </Screen>
     );
@@ -321,7 +378,7 @@ export function DashboardScreen() {
           </Text>
           <Text style={styles.connectHint}>{error.message}</Text>
           <Text style={styles.connectHint}>UID  ·  {user?.uid ?? 'NONE'}</Text>
-          <Text style={styles.connectHint}>UNIT  ·  {DEV_UNIT_ID}</Text>
+          <Text style={styles.connectHint}>UNIT  ·  {unitId}</Text>
         </View>
       </Screen>
     );
@@ -336,7 +393,7 @@ export function DashboardScreen() {
             Waiting for the controller to publish its first snapshot.
           </Text>
           <Text style={styles.connectHint}>UID  ·  {user?.uid ?? 'NONE'}</Text>
-          <Text style={styles.connectHint}>UNIT  ·  {DEV_UNIT_ID}</Text>
+          <Text style={styles.connectHint}>UNIT  ·  {unitId}</Text>
         </View>
       </Screen>
     );
@@ -400,12 +457,12 @@ export function DashboardScreen() {
         showsVerticalScrollIndicator={false}
       >
         <Eyebrow
-          parts={[DEV_UNIT_ID, STALENESS_LABEL[staleness] ?? '—']}
+          parts={[unitId ?? '—', STALENESS_LABEL[staleness] ?? '—']}
           live
           staleness={stalenessKind}
         />
 
-        <FuelAlertBanner unitId={DEV_UNIT_ID} />
+        <FuelAlertBanner unitId={unitId} />
 
         <CornerBrackets style={styles.hero}>
           <View style={styles.heroInner}>
@@ -526,7 +583,7 @@ export function DashboardScreen() {
           </View>
         ) : null}
 
-        <FigCaption number={1} label="Dashboard" detail={DEV_UNIT_ID} />
+        <FigCaption number={1} label="Dashboard" detail={unitId ?? undefined} />
       </ScrollView>
     </Screen>
   );

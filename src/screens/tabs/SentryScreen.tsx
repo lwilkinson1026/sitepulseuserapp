@@ -26,6 +26,7 @@ import {
 } from '../../firebase/commands';
 import type { CameraState, SentryConfig, SentryState } from '../../firebase/types';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
+import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
 // Phase D1 — sentry tab.
 //
@@ -35,8 +36,6 @@ import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../the
 // button issues `camera.startStream` but the URL pipeline isn't wired
 // until a Cloudflare Stream Live Input is provisioned.
 
-const DEV_UNIT_ID = process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? 'UNIT-001';
-
 const SENSITIVITY_STEPS: Array<{ label: string; value: number }> = [
   { label: 'LOW',    value: 0.2 },
   { label: 'MED',    value: 0.4 },
@@ -44,11 +43,12 @@ const SENSITIVITY_STEPS: Array<{ label: string; value: number }> = [
 ];
 
 export function SentryScreen() {
+  const { unitId } = useActiveUnit();
   const { user } = useAuth();
-  const config = useUnitDoc<SentryConfig>(DEV_UNIT_ID, 'config', 'sentry');
-  const state = useUnitDoc<SentryState>(DEV_UNIT_ID, 'current', 'sentry');
-  const camera = useUnitDoc<CameraState & { error?: string | null }>(DEV_UNIT_ID, 'current', 'camera');
-  const events = useUnitEvents(DEV_UNIT_ID, { kindFilter: 'motion', pageSize: 20 });
+  const config = useUnitDoc<SentryConfig>(unitId, 'config', 'sentry');
+  const state = useUnitDoc<SentryState>(unitId, 'current', 'sentry');
+  const camera = useUnitDoc<CameraState & { error?: string | null }>(unitId, 'current', 'camera');
+  const events = useUnitEvents(unitId, { kindFilter: 'motion', pageSize: 20 });
 
   // ALL hook calls up-front so hook order is consistent across renders
   // (React's rules-of-hooks). The early loading return below must come
@@ -69,7 +69,7 @@ export function SentryScreen() {
 
   const loading = config.loading || state.loading;
 
-  if (!user || loading) {
+  if (!user || !unitId || loading) {
     return (
       <Screen>
         <View style={styles.center}>
@@ -84,35 +84,35 @@ export function SentryScreen() {
 
   const onToggleEnabled = (next: boolean) => {
     setEnabledOptimistic(next);
-    void (next ? armSentry(DEV_UNIT_ID, user.uid) : disarmSentry(DEV_UNIT_ID, user.uid));
+    void (next ? armSentry(unitId, user.uid) : disarmSentry(unitId, user.uid));
   };
 
   const onSetSensitivity = (value: number) => {
     setSensitivityOptimistic(value);
-    void updateSentryConfig(DEV_UNIT_ID, user.uid, { sensitivity: value });
+    void updateSentryConfig(unitId, user.uid, { sensitivity: value });
   };
 
   const onToggleAutoLight = (next: boolean) => {
     setAutoLightOptimistic(next);
-    void updateSentryConfig(DEV_UNIT_ID, user.uid, { autoLight: next });
+    void updateSentryConfig(unitId, user.uid, { autoLight: next });
   };
 
   const onToggleNotify = (next: boolean) => {
     setNotifyOptimistic(next);
-    void updateSentryConfig(DEV_UNIT_ID, user.uid, { notifyOnMotion: next });
+    void updateSentryConfig(unitId, user.uid, { notifyOnMotion: next });
   };
 
   const onToggleScare = (next: boolean) => {
     setScareOptimistic(next);
-    void updateSentryConfig(DEV_UNIT_ID, user.uid, { scareMode: next });
+    void updateSentryConfig(unitId, user.uid, { scareMode: next });
   };
 
   const onGoLive = () => {
-    void startCameraStream(DEV_UNIT_ID, user.uid);
+    void startCameraStream(unitId, user.uid);
   };
 
   const onStopStream = () => {
-    void stopCameraStream(DEV_UNIT_ID, user.uid);
+    void stopCameraStream(unitId, user.uid);
   };
 
   return (
@@ -264,7 +264,7 @@ export function SentryScreen() {
           )}
         </View>
 
-        <FigCaption number={4} label="Sentry" detail={DEV_UNIT_ID} />
+        <FigCaption number={4} label="Sentry" detail={unitId ?? undefined} />
       </ScrollView>
     </Screen>
   );
