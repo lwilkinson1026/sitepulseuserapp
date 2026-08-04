@@ -9,7 +9,7 @@ Usage:
 
 Defaults match the locked-in decisions documented in the feature plan:
   - Waveshare RPi Relay Board (B), 3 channels; channel 1 = security light
-  - LiFePO4 15S thresholds: socStart 25, socStop 85, socCritical 12
+  - LiFePO4 thresholds (SoC %, cell-count independent): socStart 25, socStop 85, socCritical 12
   - Quiet hours 21:00–07:00, allowQuietOverride = false
   - Camera: /dev/video0, 720p @ 24fps, no Cloudflare input bound yet
 """
@@ -28,6 +28,24 @@ UNIT_ID         = os.environ.get("SITEPULSE_UNIT_ID", "UNIT-001")
 SERVICE_ACCOUNT = os.path.expanduser(
     os.environ.get("SITEPULSE_SA", "~/sitepulse/service-account.json")
 )
+
+# Series cell count of THIS unit's pack. Drives both the seeded cellCount
+# and every voltage threshold below, so the whole doc stays self-consistent
+# instead of mixing a threshold from one pack geometry with another.
+#
+# Count the cells; do not infer it from a voltage reading. Set it via
+# SITEPULSE_CELL_COUNT before seeding a new unit.
+_CELL_COUNT = int(os.environ.get("SITEPULSE_CELL_COUNT", "14"))
+
+
+def _pack_v(v_per_cell: float) -> float:
+    """Pack voltage for this unit from a per-cell figure.
+
+    Local rather than importing voltage_soc so seed_config stays runnable
+    standalone on a fresh machine before the rest of the package is
+    deployed. Values must match voltage_soc.pack_threshold().
+    """
+    return round(v_per_cell * _CELL_COUNT, 1)
 
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {
@@ -115,6 +133,22 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "pressDurationSec": 0.15,
     },
     "engine": {
+        # ── Pack geometry — SET THIS PER UNIT BEFORE ANYTHING ELSE ────────
+        # Series cell count. THE FLEET IS MIXED — UNIT-001 is 15S, UNIT-002
+        # is 14S — so this must be set per unit, never copied. Every
+        # "voltage*" key on this doc is a PACK voltage, meaningless without it —
+        # and voltage→SoC cannot be computed at all without it. 49 V is a
+        # full 14S pack OR a half-charged 15S one, and nothing in the
+        # telemetry disambiguates. Count the cells; never infer.
+        #
+        # Derive pack thresholds from voltage_soc.py rather than typing
+        # numbers:
+        #     voltage_soc.pack_threshold(voltage_soc.STOP_V_PER_CELL, n)
+        # A 52.5 V charge-complete (correct only for 15S) is 3.75 V/cell on
+        # 14S — above LiFePO4 maximum — so the charge loop could never
+        # terminate on voltage and instead ran the engine the full
+        # maxDurationSec, every cycle, undetected.
+        "cellCount": _CELL_COUNT,
         # Waveshare relay channel wired to the cooling fans. Hardwired to
         # engine-follow in pi/relays.py: energized whenever the engine is
         # running/charging, regardless of config/relays mode. The app hides
@@ -172,19 +206,19 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # Conservative default so the engine isn't bogged down before
             # we know what it can sustain.
             "currentAmps":      25.0,
-            # Pack voltage to stop charging (charge complete). 15S LiFePO4
-            # rests fully charged at ~52.8 V (3.52 V/cell, measured). Set
-            # voltageStop just below that so the under-charge-load voltage
-            # rise doesn't trip the BMS termination point. 52.5 V (3.50 V/cell)
-            # lands at ~95–98 % SOC when the load releases.
-            "voltageStop":      52.5,
+            # Pack voltage to stop charging (charge complete). A 14S
+            # LiFePO4 pack rests fully charged at ~49.5 V (3.54 V/cell,
+            # measured on UNIT-002 2026-07-29). Sits just below that so the
+            # under-charge-load voltage rise doesn't trip BMS termination;
+            # 3.50 V/cell lands at ~95–98 % SOC when the load releases.
+            "voltageStop":      _pack_v(3.500),
             # Hard pack-protection floor (NOT an "engine not generating"
             # detector — minRpmForLoad already covers that). A big external
             # load sags the pack well below resting; aborting there only
             # drains it faster, so this sits near BMS-cutoff territory.
-            # LiFePO4 BMS cuts ~2.5 V/cell = ~37.5 V on 15S; 42.0 V
-            # (2.8 V/cell) keeps ~4.5 V headroom while clearing load sag.
-            "voltageMinAbort":  42.0,
+            # LiFePO4 BMS cuts ~2.5 V/cell = ~35 V on 14S; 3.00 V/cell
+            # keeps ~7 V of headroom while clearing load sag.
+            "voltageMinAbort":  _pack_v(3.000),
             # Hard ceiling on charge duration; engine auto-stops on timeout.
             # Code clamps to 2 hours; default to that full 2-hour window.
             "maxDurationSec":   7200,    # 2 hours
@@ -240,11 +274,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # the current load is short — we'd just restart immediately.
             "sustainableRunwayMin": 180,   # only stop if runway ≥ this OR no load
 
-            # Voltage fallback (15S LiFePO4 curve in src/lib/voltageSoc.ts).
+            # Voltage fallback (per-cell LiFePO4 curve in pi/voltage_soc.py).
             # Consulted only when battery_soc is null (LCD asleep + servo
             # wake failed). Stop threshold lives in engine.charge.voltageStop.
-            "voltageStart":         48.0,
-            "voltageCritical":      46.5,
+            "voltageStart":         _pack_v(3.200),
+            "voltageCritical":      _pack_v(3.100),
                                             # (if allowQuietOverride is true)
             "tickIntervalSec":      15,
             "actionCooldownSec":    60,

@@ -150,15 +150,17 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # before we know what it can sustain.
     "currentAmps":      25.0,
     # Voltage thresholds. Pack voltage as reported by the VESC.
-    # 15S LiFePO4: ~52.8 V resting full (measured), ~51.5 V ≈ 90 % SOC,
-    # ~46.5 V ≈ 10 % SOC. BMS termination ~3.5 V/cell × 15 = 52.5 V.
-    "voltageStop":      52.5,    # exit charge loop when pack rises above this
+    # 14S LiFePO4: ~49.5 V resting full (measured on UNIT-002 2026-07-29),
+    # ~48.1 V ≈ 90 % SOC, ~43.4 V ≈ 10 % SOC. BMS termination is around
+    # 3.5 V/cell × 14 = 49.0 V. Derive these with voltage_soc.py, don't
+    # retype them — a pack voltage means nothing without its cell count.
+    "voltageStop":      49.0,    # exit charge loop when pack rises above this
     # Hard pack-protection floor: abort charge if pack sags below this.
     # NOT meant to detect "engine not generating" (the minRpmForLoad bog
     # check already does that) — a big external load legitimately sags the
     # pack well below resting, and aborting only drains it faster. So this
-    # sits near BMS-cutoff territory: 42.0 V = 2.8 V/cell on 15S LiFePO4,
-    # ~4.5 V above the ~37.5 V BMS cut, comfortably below heavy-load sag.
+    # sits near BMS-cutoff territory: 42.0 V = 3.00 V/cell on 14S LiFePO4,
+    # ~7 V above the ~35 V BMS cut, comfortably below heavy-load sag.
     "voltageMinAbort":  42.0,
     # Safety ceiling — even with no other exit, charge dies after this much
     # wall-clock time, then the engine auto-stops (see _run_charge_loop's
@@ -692,13 +694,13 @@ def _resolve_charge_params(
 ) -> Dict[str, Any]:
     """Combine config + payload overrides, clamp to hard ceilings."""
     current_amps = float(payload.get("currentAmpsOverride", cfg.get("currentAmps", 10)))
-    voltage_stop = float(payload.get("voltageStopOverride", cfg.get("voltageStop", 54)))
+    voltage_stop = float(payload.get("voltageStopOverride", cfg.get("voltageStop", 49.0)))
     max_dur      = float(payload.get("maxDurationSecOverride", cfg.get("maxDurationSec", 3600)))
 
     return {
         "current_amps":      max(0.0, min(MAX_CHARGE_AMPS_HARD, current_amps)),
         "voltage_stop":      voltage_stop,
-        "voltage_min_abort": float(cfg.get("voltageMinAbort", 44.0)),
+        "voltage_min_abort": float(cfg.get("voltageMinAbort", 42.0)),
         "max_duration_sec":  max(1.0, min(MAX_CHARGE_DURATION_HARD, max_dur)),
         "refresh_hz":        max(MIN_REFRESH_HZ, min(MAX_REFRESH_HZ, int(cfg.get("refreshHz", 10)))),
         "min_rpm_for_load":  int(cfg.get("minRpmForLoad", 800)),

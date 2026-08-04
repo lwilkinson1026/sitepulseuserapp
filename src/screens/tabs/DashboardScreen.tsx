@@ -4,7 +4,7 @@ import { CornerBrackets, Eyebrow, FigCaption, FuelAlertBanner, Screen, Secondary
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
 import { useAuth } from '../../hooks/AuthContext';
-import type { EngineState } from '../../firebase/types';
+import type { EngineConfig, EngineState } from '../../firebase/types';
 import {
   chargeEngine,
   crankEngine,
@@ -15,7 +15,7 @@ import {
   wakeLcd,
 } from '../../firebase/commands';
 import { confirm } from '../../lib/confirm';
-import { vescVoltsToSoc } from '../../lib/voltageSoc';
+import { vescVoltsToSoc, DEFAULT_CELL_COUNT } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase-1 dashboard. Subscribes to units/{unitId}/current/snapshot in
@@ -105,6 +105,10 @@ export function DashboardScreen() {
   // Same doc the ScheduleScreen reads — the Pi merges scheduler and runtime
   // fields together, so this read may contain both shapes.
   const engineState = useUnitDoc<EngineState>(DEV_UNIT_ID, 'current', 'engine');
+  // Needed for the voltage→SoC fallback: the curve is per-cell, and this
+  // unit's pack geometry decides what a given pack voltage means. 49 V is
+  // a full 14S pack or a half-charged 15S one.
+  const engineConfig = useUnitDoc<EngineConfig>(DEV_UNIT_ID, 'config', 'engine');
   const { user } = useAuth();
   // 'pending' covers the brief window between tap and Pi ack. We don't
   // round-trip the ack into here yet — just debounce by time to prevent
@@ -122,6 +126,7 @@ export function DashboardScreen() {
     if (!snapshot) return;
     const sample = vescVoltsToSoc(
       snapshot.motor_volts,
+      engineConfig.data?.cellCount ?? DEFAULT_CELL_COUNT,
       snapshot.motor_amps_in,
     );
     if (sample === null) return;
@@ -132,7 +137,10 @@ export function DashboardScreen() {
             VESC_SOC_EMA_ALPHA * sample + (1 - VESC_SOC_EMA_ALPHA) * prev,
           ),
     );
-  }, [snapshot]);
+    // cellCount is a dependency: config/engine usually resolves AFTER the
+    // first snapshot, and without it here the estimate would stay pinned to
+    // the DEFAULT_CELL_COUNT fallback for the life of the screen.
+  }, [snapshot, engineConfig.data?.cellCount]);
 
   const onWakePress = async () => {
     if (!user || wakeBusy) return;

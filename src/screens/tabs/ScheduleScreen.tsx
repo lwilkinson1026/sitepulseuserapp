@@ -19,7 +19,7 @@ import type {
   EngineConfig,
   EngineState,
 } from '../../firebase/types';
-import { vescVoltsToSoc } from '../../lib/voltageSoc';
+import { vescVoltsToSoc, DEFAULT_CELL_COUNT } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 
 // Phase C — engine recharge schedule.
@@ -39,8 +39,8 @@ const DAY_LABELS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
 // ─── presets ────────────────────────────────────────────────────────────────
 // Each preset is a complete config patch — applying one fully reconfigures
-// the schedule, no merging required. Thresholds match the LiFePO4 14S
-// defaults locked into the plan (25/85/12).
+// the schedule, no merging required. SoC thresholds are percentages and
+// so are cell-count independent (25/85/12).
 
 type PresetId = 'daytime_only' | 'eco' | 'quiet_off' | 'storm';
 
@@ -164,9 +164,15 @@ export function ScheduleScreen() {
   // Voltage thresholds the supervisor actually uses. Defaults mirror
   // pi/engine_supervisor.py + pi/engine.py DEFAULT_CHARGE_CONFIG so the
   // UI shows sane numbers even before config/engine is populated.
-  const voltageStart = engineConfig.data?.supervisor?.voltageStart ?? 45.0;
-  const voltageCritical = engineConfig.data?.supervisor?.voltageCritical ?? 44.0;
-  const voltageStop = engineConfig.data?.charge?.voltageStop ?? 54.0;
+  // Pack geometry. Every voltage below is a PACK voltage, so the SoC
+  // translations beside them are only correct alongside this. Was hardcoded
+  // "14S" in the section header while the curve underneath assumed 15S.
+  const cellCount = engineConfig.data?.cellCount ?? DEFAULT_CELL_COUNT;
+  // Fallbacks are the 14S pack values (3.200 / 3.100 / 3.500 V/cell), so a
+  // brief pre-config render shows plausible numbers rather than 15S-era ones.
+  const voltageStart = engineConfig.data?.supervisor?.voltageStart ?? 44.8;
+  const voltageCritical = engineConfig.data?.supervisor?.voltageCritical ?? 43.4;
+  const voltageStop = engineConfig.data?.charge?.voltageStop ?? 49.0;
 
   const onToggleEnabled = (next: boolean) => {
     setEnabledOptimistic(next);
@@ -329,17 +335,20 @@ export function ScheduleScreen() {
             (pack voltage from the VESC). Approximate SoC % is shown in
             small text as a sanity-check translation via vescVoltsToSoc. */}
         <View style={styles.section}>
-          <Eyebrow parts={['Thresholds', 'LiFePO4 14S · pack V']} />
+          <Eyebrow parts={['Thresholds', `LiFePO4 ${cellCount}S · pack V`]} />
           <ThresholdRow
             label="ENGINE STARTS BELOW"
+            cellCount={cellCount}
             volts={voltageStart}
           />
           <ThresholdRow
             label="ENGINE STOPS ABOVE"
+            cellCount={cellCount}
             volts={voltageStop}
           />
           <ThresholdRow
             label="CRITICAL (QUIET OVERRIDE)"
+            cellCount={cellCount}
             volts={voltageCritical}
           />
         </View>
@@ -372,8 +381,13 @@ export function ScheduleScreen() {
 // Renders one threshold row: label on the left, big voltage on the right
 // with a small "≈ XX%" SoC approximation under it. Voltage is the source
 // of truth — the SoC translation is just user-friendly context.
-function ThresholdRow({ label, volts }: { label: string; volts: number }) {
-  const approxSoc = vescVoltsToSoc(volts);
+function ThresholdRow(
+  { label, volts, cellCount }:
+  { label: string; volts: number; cellCount: number },
+) {
+  // No ampsIn: these are static configured thresholds, not live readings,
+  // so there is no current to compensate for.
+  const approxSoc = vescVoltsToSoc(volts, cellCount);
   return (
     <View style={styles.thresholdRow}>
       <Text style={styles.thresholdKey}>{label}</Text>

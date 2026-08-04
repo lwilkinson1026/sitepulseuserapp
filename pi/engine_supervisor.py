@@ -68,6 +68,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
+import voltage_soc
+
 
 # ─── defaults ──────────────────────────────────────────────────────────────
 
@@ -94,10 +96,13 @@ DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
     "sustainableRunwayMin":  180,   # only stop if runway ≥ this OR no load
 
     # Voltage fallback for when LCD is asleep AND battery_soc is null in
-    # the snapshot. Curve is 15S LiFePO4; see _volts_to_soc_15s below
-    # and src/lib/voltageSoc.ts for the matching display curve.
-    "voltageStart":          48.0,
-    "voltageCritical":       46.5,
+    # the snapshot. PACK volts, so they only mean anything alongside a cell
+    # count — 3.200 and 3.100 V/cell on the fleet's 14S packs. Derive them
+    # with voltage_soc.pack_threshold() rather than typing numbers; a pack
+    # voltage written without its cell count is the bug that left UNIT-002
+    # unable to ever finish a charge.
+    "voltageStart":          44.8,
+    "voltageCritical":       43.4,
 
     # How often the supervisor evaluates state. Each tick wakes the LCD
     # before reading, so don't tick too aggressively or the servo wears
@@ -111,40 +116,12 @@ DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
 }
 
 
-# Voltage → SoC curve for the 15S LiFePO4 pack. Mirror of CURVE in
-# src/lib/voltageSoc.ts — keep both in sync if you adjust either. This
-# is the SoC fallback when Predator LCD is unavailable (asleep, servo
-# failed). Note it's voltage-only and doesn't compensate for load IR
-# drop, so under heavy load it will read low; that's why the LCD path
-# is primary.
-_SOC_CURVE_15S = (
-    (45.0,   0),
-    (46.5,  10),
-    (48.0,  20),
-    (48.5,  30),
-    (49.0,  50),
-    (49.5,  70),
-    (50.25, 80),
-    (51.5,  90),
-    (52.5,  95),
-    (53.25, 100),
-)
-
-
-def _volts_to_soc_15s(v: float) -> int:
-    """Linearly interpolate the 15S LiFePO4 voltage→SoC curve. Clamps to
-    [0, 100] outside the curve range."""
-    if v <= _SOC_CURVE_15S[0][0]:
-        return 0
-    if v >= _SOC_CURVE_15S[-1][0]:
-        return 100
-    for i in range(1, len(_SOC_CURVE_15S)):
-        hi_v, hi_s = _SOC_CURVE_15S[i]
-        if v <= hi_v:
-            lo_v, lo_s = _SOC_CURVE_15S[i - 1]
-            t = (v - lo_v) / (hi_v - lo_v)
-            return round(lo_s + t * (hi_s - lo_s))
-    return 100  # unreachable; satisfies type checker
+# The voltage→SoC curve used to live here as a hardcoded pack-volt table
+# for a pack wrongly believed to be 15S, with a comment asking whoever
+# edited it to also hand-edit the copy in src/lib/voltageSoc.ts. They
+# drifted anyway — the two disagreed by 10 points at 49.5 V — and the
+# pack-volt form produced nonsense on the real 14S packs. Both problems are
+# structural, so the curve now lives once, per cell, in voltage_soc.py.
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -509,17 +486,17 @@ class EngineSupervisor:
         return cfg
 
     def _load_voltage_stop(self) -> float:
-        # 15S LiFePO4 default — used only for logging / event metadata
-        # since the supervisor's decisions are SoC-based now. Charge loop
-        # uses its own config-driven value.
+        # Used only for logging / event metadata since the supervisor's
+        # decisions are SoC-based now; the charge loop uses its own
+        # config-driven value. Default is 3.500 V/cell on the fleet's 14S.
         try:
             snap = self.db.document(f"units/{self.unit_id}/config/engine").get()
             if snap.exists:
                 charge_block = (snap.to_dict() or {}).get("charge", {})
-                return float(charge_block.get("voltageStop", 52.5))
+                return float(charge_block.get("voltageStop", 49.0))
         except Exception:
             pass
-        return 52.5
+        return 49.0
 
     def _load_allow_quiet_override(self) -> bool:
         try:
@@ -602,8 +579,12 @@ class EngineSupervisor:
 
         Predator LCD-derived `battery_soc` is the primary because the
         Predator BMS coulomb-counts internally — load IR sag doesn't fool
-        it. Falls back to VESC voltage interpreted on the 15S LiFePO4
+        it. Falls back to VESC voltage on this unit's per-cell LiFePO4
         curve when battery_soc is null (LCD asleep, or servo wake failed).
+
+        The fallback compensates for internal-resistance offset using
+        `motor_amps_in` when it's available, so a decision made mid-charge
+        isn't skewed by the terminal-voltage lift from regen current.
 
         Returns (soc_pct, source_label) or (None, None) if no signal.
         """
@@ -612,8 +593,46 @@ class EngineSupervisor:
             return int(soc), "predator"
         v = telem.get("motor_volts")
         if v is not None:
-            return _volts_to_soc_15s(float(v)), "vesc_voltage"
+            est = voltage_soc.volts_to_soc(
+                float(v),
+                cell_count=self._load_cell_count(),
+                amps_in=telem.get("motor_amps_in"),
+            )
+            if est is not None:
+                return est, "vesc_voltage"
         return None, None
+
+    def _load_cell_count(self) -> int:
+        """Series cell count for this unit's pack, from config/engine.
+
+        Cannot be inferred from voltage — 49 V is a full 14S pack or a
+        mid-charge 15S pack, and guessing wrong yields a plausible, wrong
+        SoC rather than an error — the whole fleet is 14S. Cached after the
+        first successful read;
+        a pack's cell count doesn't change without someone rebuilding it.
+        """
+        cached = getattr(self, "_cell_count_cache", None)
+        if cached is not None:
+            return cached
+        n = voltage_soc.DEFAULT_CELL_COUNT
+        try:
+            snap = self.db.document(f"units/{self.unit_id}/config/engine").get()
+            if snap.exists:
+                raw = (snap.to_dict() or {}).get("cellCount")
+                if isinstance(raw, (int, float)) and 4 <= int(raw) <= 24:
+                    n = int(raw)
+                else:
+                    print(
+                        f"[supervisor] config/engine.cellCount missing or "
+                        f"invalid ({raw!r}); assuming {n}S. A wrong cell "
+                        f"count silently distorts every voltage-derived SoC.",
+                        flush=True,
+                    )
+        except Exception as e:
+            print(f"[supervisor] cellCount read failed: {e!r}", flush=True)
+        self._cell_count_cache = n
+        print(f"[supervisor] pack {voltage_soc.describe(n)}", flush=True)
+        return n
 
     def _pre_wake_lcd(self) -> None:
         """Press the Predator LCD wake button right before reading telemetry,
