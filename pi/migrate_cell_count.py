@@ -108,6 +108,22 @@ def desired_engine_patch(cell_count: int) -> dict:
     }
 
 
+# cellCount lives in TWO places and both must agree:
+#   units/{id}.cellCount              <- what the APP reads (UnitDoc), via
+#                                        ActiveUnitContext -> vescVoltsToSoc
+#   units/{id}/config/engine.cellCount <- what the PI reads (supervisor,
+#                                        scheduler, voltage_soc)
+#
+# They were written independently — the app-side per-cell work landed in
+# 3b542fe against the unit doc, the Pi-side against config/engine — and drifted
+# immediately: on 2026-08-04 UNIT-002 had 15 on config/engine and a stale 14 on
+# the unit doc, so the Pi computed SoC correctly while the app displayed ~87 %
+# for a pack that was really at ~24 %. This migration writes both so they
+# cannot diverge again. If you consolidate to one location later, delete the
+# other deliberately rather than letting one rot.
+UNIT_DOC_FIELD = "cellCount"
+
+
 def current_value(doc: dict, dotted: str):
     node = doc
     for part in dotted.split("."):
@@ -155,10 +171,30 @@ def main() -> int:
             if not same:
                 changes[key] = want
 
+        # Keep the unit doc in step — this is the copy the app reads.
+        unit_ref = db.document(f"units/{unit_id}")
+        unit_doc = unit_ref.get().to_dict() or {}
+        unit_cells = unit_doc.get(UNIT_DOC_FIELD)
+        if unit_cells != cells:
+            print("  %-28s %-8s -> %-8s CHANGE  (unit doc — the APP reads this)"
+                  % ("units/%s.cellCount" % unit_id, unit_cells if unit_cells is not None else "(unset)", cells))
+            total_changes += 1
+            if apply:
+                unit_ref.set({UNIT_DOC_FIELD: cells}, merge=True)
+                back = (unit_ref.get().to_dict() or {}).get(UNIT_DOC_FIELD)
+                if back != cells:
+                    print(f"  !! VERIFY FAILED on unit doc: {back!r}")
+                    return 1
+                print("  unit doc updated + verified")
+        else:
+            print("  %-28s %-8s -> %-8s   ok  (unit doc)"
+                  % ("units/%s.cellCount" % unit_id, unit_cells, cells))
+
         if not changes:
             print("  (no changes)")
             continue
         total_changes += len(changes)
+
 
         if apply:
             ref.update(changes)

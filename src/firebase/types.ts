@@ -30,9 +30,15 @@ export interface UnitDoc {
   lastSeen: Timestamp | null;
   regionTimezone: string;          // IANA tz, e.g. "America/Denver"
   /**
-   * Series cell count of this unit's LiFePO4 pack. UNIT-001 is 15S, UNIT-002
-   * is 14S — so pack voltage alone cannot be interpreted without this. 49.5 V
-   * is a full 14S pack and a half-empty 15S one.
+   * Series cell count of this unit's LiFePO4 pack. Pack voltage alone cannot
+   * be interpreted without it: 49.5 V is a full 14S pack and a half-empty 15S
+   * one. Both units are currently 15S (settled 2026-08-04).
+   *
+   * ⚠️ This field is duplicated at units/{id}/config/engine.cellCount, which is
+   * what the Pi reads. They drifted on 2026-08-04 — this doc said 14 while
+   * config/engine said 15, so the Pi computed SoC correctly while the app
+   * displayed ~87 % for a pack really at ~24 %. pi/migrate_cell_count.py now
+   * writes both. Change them together or consolidate deliberately.
    *
    * Optional because it postdates the units already in Firestore. Consumers
    * must treat "missing" as "no SOC estimate available" rather than assuming a

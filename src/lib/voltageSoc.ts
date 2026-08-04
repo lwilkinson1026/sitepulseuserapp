@@ -9,16 +9,19 @@
 // isn't a coulomb-counted reading.
 //
 // ── Why this curve is per-cell, not per-pack ───────────────────────────────
-// Cell count differs between units: UNIT-001 is 15S (52.8 V resting full),
-// UNIT-002 is 14S (49.5 V resting full). Pack voltage is therefore meaningless
-// on its own — 49.5 V is a FULL 14S pack but a nearly-flat 15S one. The
+// Pack voltage is meaningless without a cell count: 49.5 V is a FULL 14S pack
+// but a nearly-flat 15S one, and no telemetry distinguishes them. The
 // invariant across the fleet is volts *per cell*, which is set by the
 // chemistry, so the curve is stored per-cell and scaled by the unit's
-// `cellCount` at lookup time.
+// `cellCount` at lookup time. Never reintroduce a pack-voltage constant here.
 //
-// Copying pack voltages between units is exactly the mistake that produced an
-// unreachable 52.5 V charge-stop on the 14S unit. Do not reintroduce a
-// pack-voltage constant here.
+// Both units are currently 15S. That was NOT always believed: UNIT-002 was
+// recorded as 14S from a 49.5 V reading described as "resting full", which was
+// never confirmed against a 100 % LCD reading — and on 15S, 49.5 V is just an
+// ordinary mid-pack voltage. Settled 2026-08-04 by comparing rested pack
+// voltage against the coulomb-counted LCD SoC on both units (see
+// pi/voltage_soc.py for the numbers). Keep reading this file as per-cell
+// regardless: the whole point is that cell count is data, not an assumption.
 //
 // ── Calibration provenance ────────────────────────────────────────────────
 // The anchors below were all measured on the 15S pack, so they are recorded
