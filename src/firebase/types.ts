@@ -281,8 +281,8 @@ export interface EngineStartConfig {
 export interface EngineConfig {
   supervisor?: Partial<EngineSupervisorConfig>;
   charge?: Partial<EngineChargeConfig>;
-  // Series cell count of this unit's LiFePO4 pack. THE FLEET IS MIXED —
-  // UNIT-001 is 15S, UNIT-002 is 14S — so this is per unit, never copied: every
+  // Series cell count of this unit's LiFePO4 pack. The fleet is 15S, but this
+  // is recorded per unit rather than assumed, because every
   // voltage threshold on this doc is a PACK voltage and is only meaningful
   // alongside this number, and voltage→SoC cannot be computed without it —
   // 49 V is a full 14S pack or a half-charged 15S one, and no telemetry

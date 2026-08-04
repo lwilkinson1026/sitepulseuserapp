@@ -2,8 +2,8 @@
 // Predator 2000W. Used as a fallback display when the LCD-derived SOC from
 // the Predator I²C decoder is null or stale (e.g. LCD sleeping/dark).
 //
-// THE FLEET IS MIXED: UNIT-001 is 15S, UNIT-002 is 14S. The curve below is
-// expressed PER CELL and MUST be multiplied by the unit's
+// THE FLEET IS 15S — both units (settled 2026-08-04). The curve below is
+// still expressed PER CELL and MUST be multiplied by the unit's
 // config/engine.cellCount at the point of use — never assume a pack size.
 // Keep it identical to SOC_CURVE_V_PER_CELL in pi/voltage_soc.py, which
 // carries the full rationale, the calibration provenance, and the method
@@ -15,12 +15,14 @@
 // dashboard marks it "(APPROX)" so it reads as an estimate, not a
 // coulomb-counted measurement.
 //
-// Anchors, both measured on UNIT-001 (15S): 52.8 V resting full =
-// 3.520 V/cell (2026-06-05), and 50.1 V @ LCD 71 % = 3.340 V/cell
-// (2026-06-10). Cross-checked on the 14S pack: the curve's 100 % point
-// (3.5333 V/cell) is 49.5 V, matching UNIT-002's measured resting-full
-// (multimeter, 2026-07-29). The same per-cell shape is anchored
-// independently on both packs.
+// Anchors, both measured on UNIT-001: 52.8 V resting full = 3.520 V/cell
+// (2026-06-05), and 50.1 V @ LCD 71 % = 3.340 V/cell (2026-06-10).
+//
+// A 2026-07-29 multimeter reading of 49.5 V on UNIT-002 was once recorded as
+// "resting full" and used to argue that pack was 14S. That was never verified
+// against a 100 % LCD reading, and on 15S it is 3.30 V/cell — an ordinary
+// mid-pack voltage. Treat it as unproven. See pi/voltage_soc.py for the
+// at-rest voltage-vs-LCD comparison that settled the fleet at 15S.
 //
 // Internal pack resistance, per cell, in ohms. Undoes the terminal-voltage
 // lift while regen current is being pumped in:
@@ -42,8 +44,8 @@ const PACK_RESISTANCE_OHMS_PER_CELL = 0.10 / 15;
 // Both this file and the Python supervisor used to carry their own copy of
 // the curve in PACK volts, each with a comment asking the next editor to
 // hand-update the other. They drifted regardless — the two disagreed by 10
-// points at 49.5 V — and the pack-volt form produced badly wrong numbers on
-// the real 14S packs, where a full battery reads as ~50 % on a 15S curve.
+// points at 49.5 V — and the pack-volt form makes every threshold silently
+// wrong the moment a pack's cell count differs from whatever was assumed.
 //
 // Per-cell fixes both: the curve is a property of LiFePO4 chemistry, not of
 // one particular pack, and multiplying by cellCount at the point of use
@@ -61,16 +63,15 @@ const CURVE_PER_CELL: ReadonlyArray<SocPoint> = [
   { vPerCell: 3.3400, soc: 71 },   // ← anchor: 50.1 V @ LCD 71 % on 15S, 2026-06-10
   { vPerCell: 3.3667, soc: 80 },
   { vPerCell: 3.4333, soc: 90 },
-  { vPerCell: 3.5000, soc: 95 },   // ← engine.charge.voltageStop (49.0 V on 14S)
-  { vPerCell: 3.5333, soc: 100 }, // resting full: 52.8 V on 15S / 49.5 V on 14S
+  { vPerCell: 3.5000, soc: 95 },   // ← engine.charge.voltageStop (52.5 V on 15S)
+  { vPerCell: 3.5333, soc: 100 }, // resting full: 52.8 V on 15S (measured)
 ];
 
 // Used when config/engine.cellCount is absent (docs seeded before the field
-// existed). There is no safe default for a mixed fleet; treat a missing
-// cellCount as a provisioning bug. 14 is the least-bad guess because it
-// fails visibly (charging stops early) rather than silently (voltageStop
-// unreachable → the charge loop degrades into a 2-hour timer).
-export const DEFAULT_CELL_COUNT = 14;
+// existed). The fleet is 15S. Treat a missing cellCount as a provisioning
+// bug rather than a supported configuration — a wrong cell count yields a
+// plausible, wrong SoC instead of an error.
+export const DEFAULT_CELL_COUNT = 15;
 
 /** Scale a per-cell threshold to a pack voltage, e.g. 3.5 × 14 → 49.0. */
 export function packThreshold(vPerCell: number, cellCount: number): number {

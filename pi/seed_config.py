@@ -35,7 +35,7 @@ SERVICE_ACCOUNT = os.path.expanduser(
 #
 # Count the cells; do not infer it from a voltage reading. Set it via
 # SITEPULSE_CELL_COUNT before seeding a new unit.
-_CELL_COUNT = int(os.environ.get("SITEPULSE_CELL_COUNT", "14"))
+_CELL_COUNT = int(os.environ.get("SITEPULSE_CELL_COUNT", "15"))
 
 
 def _pack_v(v_per_cell: float) -> float:
@@ -134,8 +134,8 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
     "engine": {
         # ── Pack geometry — SET THIS PER UNIT BEFORE ANYTHING ELSE ────────
-        # Series cell count. THE FLEET IS MIXED — UNIT-001 is 15S, UNIT-002
-        # is 14S — so this must be set per unit, never copied. Every
+        # Series cell count. The fleet is 15S, but set this per unit rather
+        # than assuming it — the cell count was wrong twice in one day. Every
         # "voltage*" key on this doc is a PACK voltage, meaningless without it —
         # and voltage→SoC cannot be computed at all without it. 49 V is a
         # full 14S pack OR a half-charged 15S one, and nothing in the

@@ -62,19 +62,34 @@ import voltage_soc
 # single voltage reading — 49 V is a full 14S pack or a half-charged 15S
 # one. Written down here rather than guessed.
 #
-# THE FLEET IS MIXED. Briefly set to 14S/14S on 2026-08-04 and reverted the
-# same day when live telemetry contradicted it: UNIT-001 sat at 49.4 V fully
-# at rest (A=0.0) while its coulomb-counted LCD read 44 %. On 14S that is
-# 3.53 V/cell — a FULL pack, which cannot read 44 %. On 15S it is
-# 3.29 V/cell ≈ 58 %, which is close. UNIT-002 confirms the opposite: at
-# 47.9 V under -23.5 A regen, backing out the IR lift gives ~45.7 V ≈ 48 %
-# on 14S against an LCD reading of 55 %; on 15S it would be ~5 %.
+# THE FLEET IS 15S (settled 2026-08-04, after two wrong turns).
 #
-# The lesson is that pack voltage alone never settles cell count, but pack
-# voltage PLUS a coulomb-counted SoC at rest settles it immediately.
+# Both units are the same Predator power station, so a mixed fleet was
+# always the surprising answer. The at-rest evidence agrees on both:
+#
+#   UNIT-001  49.4 V rested (A=0.0), LCD 44 %
+#             15S -> 3.29 V/cell ~ 58 %   plausible
+#             14S -> 3.53 V/cell ~ FULL   impossible at 44 %
+#   UNIT-002  47.8 V rested (A=0.0), LCD 24 %
+#             15S -> 3.19 V/cell ~ 20 %   close
+#             14S -> 3.41 V/cell ~ 87 %   nowhere near
+#
+# THE ONE CONTRADICTING DATUM: a 2026-07-29 multimeter reading of 49.5 V
+# described as "resting full" on UNIT-002, which implies 14S. That only
+# holds if the pack was genuinely full at the time. If it was not, 49.5 V
+# on 15S is 3.30 V/cell — an ordinary mid-pack voltage — and the whole 14S
+# conclusion collapses. Treat that reading as unconfirmed.
+#
+# HOW TO PROVE IT EITHER WAY, once and for all: wall-charge a pack to a
+# real 100 % on the Predator's own BMS, let it rest, then read pack voltage
+# from the VESC. ~52.5-53 V = 15S. ~49.5 V = 14S. Do this before trusting
+# any of the above.
+#
+# The durable lesson: pack voltage ALONE never settles cell count. Pack
+# voltage plus a coulomb-counted SoC AT REST does.
 FLEET = {
     "UNIT-001": 15,
-    "UNIT-002": 14,
+    "UNIT-002": 15,
 }
 
 

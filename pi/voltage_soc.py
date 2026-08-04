@@ -1,9 +1,10 @@
 """Pack voltage → state-of-charge, defined ONCE, per cell.
 
-THE FLEET IS MIXED: **UNIT-001 is 15S, UNIT-002 is 14S.** Do not "unify"
-them. This was briefly set to 14S/14S on 2026-08-04 and reverted the same
-day — see "How cell count was settled" below, because the method matters
-more than the answer.
+THE FLEET IS 15S — BOTH UNITS. They are the same Predator power station,
+so a mixed fleet was always the surprising answer. This landed only after
+two wrong turns on 2026-08-04 (all-14S, then 15S/14S mixed, then all-15S).
+Read "How cell count was settled" below before changing it again — the
+method matters more than the answer, and voltage alone will fool you.
 
 Why this module exists
 ──────────────────────
@@ -124,18 +125,17 @@ MIN_ABORT_V_PER_CELL     = 3.000
 # during a charge run.
 PACK_RESISTANCE_OHMS_PER_CELL = 0.10 / 15.0
 
-# There is no safe default for a MIXED fleet — this exists only for docs
-# seeded before cellCount was a field, and every consumer logs loudly when
-# it falls back here.
+# The fleet is 15S, so that is the default. This exists only for docs seeded
+# before cellCount was a field; every consumer logs loudly when it falls back
+# here, and a missing cellCount is a provisioning bug, not a configuration.
 #
-# 14 is chosen deliberately as the least-bad guess, because its failure mode
-# is the visible one. Guessing 14 on a 15S pack sets voltageStop too LOW, so
-# charging stops early — annoying, obvious, noticed within a cycle. Guessing
-# 15 on a 14S pack sets voltageStop above what the pack can physically reach,
-# so the charge loop never terminates on voltage and silently degrades into a
-# 2-hour timer. That second failure ran undetected on UNIT-002 for weeks.
-# Prefer a bug that announces itself.
-DEFAULT_CELL_COUNT = 14
+# Know the failure modes, because they are asymmetric. Guessing 15 on a 14S
+# pack puts voltageStop above what the pack can physically reach, so the
+# charge loop never terminates on voltage and silently degrades into a 2-hour
+# timer — that ran undetected on UNIT-002 for weeks. Guessing 14 on a 15S
+# pack stops charging at roughly a quarter full, which is annoying but
+# obvious within one cycle. The silent failure is the dangerous one.
+DEFAULT_CELL_COUNT = 15
 
 
 def pack_threshold(v_per_cell: float, cell_count: int) -> float:
