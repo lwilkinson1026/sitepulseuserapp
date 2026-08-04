@@ -2,7 +2,9 @@
 SitePulse engine recharge scheduler.
 
 Every SITEPULSE_SCHEDULER_INTERVAL seconds (default 30):
-  1. Read SoC from `units/{UNIT_ID}/current/snapshot.battery_soc`.
+  1. Read SoC from `units/{UNIT_ID}/current/snapshot.battery_soc`, falling
+     back to a voltage estimate off `motor_volts` when the Predator LCD is
+     asleep and battery_soc is null (see voltage_soc.py).
   2. Read user config from `units/{UNIT_ID}/config/charge`.
   3. Evaluate `(now, soc, config)` → `(desired, reason)`.
   4. If desired flips, log an `engine.start` / `engine.stop` event and call
@@ -37,6 +39,42 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     ZoneInfo = None  # type: ignore[assignment]
+
+import voltage_soc
+
+# Series cell count per unit, cached after first read. Packs don't change
+# cell count at runtime, and this is read on every scheduler tick.
+_cell_count_cache: Dict[str, int] = {}
+
+
+def _cell_count(db, unit_id: str) -> int:
+    """Series cell count for this unit's pack, from config/engine.
+
+    Falls back to the module default with a loud log line rather than
+    raising: a scheduler that refuses to run is worse than one running on
+    an assumed cell count, but a silently wrong cell count is worse than
+    both — hence the log.
+    """
+    cached = _cell_count_cache.get(unit_id)
+    if cached is not None:
+        return cached
+    n = voltage_soc.DEFAULT_CELL_COUNT
+    try:
+        snap = db.document(f"units/{unit_id}/config/engine").get()
+        if snap.exists:
+            raw = (snap.to_dict() or {}).get("cellCount")
+            if isinstance(raw, (int, float)) and 4 <= int(raw) <= 24:
+                n = int(raw)
+            else:
+                print(
+                    f"[scheduler] config/engine.cellCount missing or invalid "
+                    f"({raw!r}); assuming {n}S for voltage-derived SoC",
+                    flush=True,
+                )
+    except Exception as e:
+        print(f"[scheduler] cellCount read failed: {e!r}", flush=True)
+    _cell_count_cache[unit_id] = n
+    return n
 
 from firebase_admin import firestore
 
@@ -316,10 +354,28 @@ def start_scheduler(db: firestore.Client, unit_id: str) -> threading.Thread:
 
                 tel_snap = db.document(f"units/{unit_id}/current/snapshot").get()
                 soc: Optional[float] = None
+                soc_source = "none"
                 if tel_snap.exists:
-                    raw = tel_snap.get("battery_soc")
+                    tel = tel_snap.to_dict() or {}
+                    raw = tel.get("battery_soc")
                     if isinstance(raw, (int, float)):
                         soc = float(raw)
+                        soc_source = "predator"
+                    else:
+                        # LCD asleep or dark. Without this fallback the
+                        # evaluator below sees soc=None and idles forever —
+                        # so a sleeping display silently disabled charging
+                        # even though the pack voltage was right there in
+                        # the same snapshot. Mirrors engine_supervisor's
+                        # _resolve_soc so both agree on what SoC means.
+                        est = voltage_soc.volts_to_soc(
+                            tel.get("motor_volts"),
+                            cell_count=_cell_count(db, unit_id),
+                            amps_in=tel.get("motor_amps_in"),
+                        )
+                        if est is not None:
+                            soc = float(est)
+                            soc_source = "vesc_voltage"
 
                 now = _now_in(zone)
 
@@ -360,11 +416,17 @@ def start_scheduler(db: firestore.Client, unit_id: str) -> threading.Thread:
                     _prior_desired = desired
 
                 # Mirror the decision so the app can render the live state row.
+                # socSource travels with socAtEval so a decision can be
+                # audited later: "predator" is coulomb-counted and trustworthy,
+                # "vesc_voltage" is an estimate off the flat LiFePO4 plateau
+                # and can be well off mid-pack. Without it, a 40 % in the
+                # event log is indistinguishable from a 40 % guess.
                 db.document(f"units/{unit_id}/current/engine").set({
                     "desired": desired,
                     "reason": reason,
                     "lastEvalAt": firestore.SERVER_TIMESTAMP,
                     "socAtEval": soc,
+                    "socSource": soc_source,
                 }, merge=True)
 
             except Exception as e:

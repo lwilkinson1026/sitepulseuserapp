@@ -57,6 +57,33 @@ SERVICE_ACCOUNT    = os.path.expanduser(
 PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "3"))
 WATCH_ADDRESS      = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 PUBLISH_RAW        = os.environ.get("SITEPULSE_PREDATOR_PUBLISH_RAW") == "1"
+
+# How long a decoded LCD frame stays credible. Past this, the Predator's
+# panel is presumed dark and every LCD-derived field publishes as null.
+#
+# This exists because the panel does not announce that it went to sleep —
+# the BMS↔LCD bus simply goes quiet. Without a staleness check the last
+# frame ever seen gets re-decoded and republished forever, so a pack that
+# was at 90 % when the display slept keeps reporting 90 % indefinitely.
+# That reads as a healthy battery, which stops the charge scheduler cold;
+# observed on UNIT-002 as `soc=84% ... frames=0 rate=0.0Hz` republished on
+# every cycle for as long as the panel stayed dark.
+#
+# Must comfortably exceed the frame period. The decoder runs ~3-6 Hz when
+# awake, so even a heavily CPU-starved unit lands a frame every few
+# hundred ms; 15 s is ~50x margin and still detects sleep within one
+# supervisor tick.
+LCD_STALE_S        = float(os.environ.get("SITEPULSE_LCD_STALE_S", "15"))
+
+# Fields that come from the LCD and are therefore meaningless once it goes
+# dark. Nulled together — publishing SoC without watts (or vice versa)
+# would imply one is fresher than the other.
+_LCD_DERIVED_FIELDS = (
+    "battery_soc",
+    "output_watts",
+    "time_to_empty_minutes",
+    "time_to_full_minutes",
+)
 DEBUG              = os.environ.get("SITEPULSE_DEBUG") == "1"
 # VESC integration is opt-out so the publisher still runs cleanly on a
 # bench Pi without the CAN HAT seated. Set to "0" to disable.
@@ -70,11 +97,22 @@ class _Stats:
         self.frames_window_start = time.monotonic()
         self.last_warnings: list[str] = []
         self.last_raw_frame: Optional[list[int]] = None
+        # Monotonic stamp of the last COMPLETED frame. None until the first
+        # one lands. Deliberately not reset by reset() — it tracks the bus,
+        # not the publish window.
+        self.last_frame_at: Optional[float] = None
+        self.lcd_awake: bool = False        # last computed staleness verdict
         self.warning_log_seen: set[str] = set()  # rate-limit duplicate warning lines
 
     def reset(self) -> None:
         self.frames_decoded = 0
         self.frames_window_start = time.monotonic()
+
+    def lcd_is_fresh(self, now: float) -> bool:
+        """True when a frame arrived recently enough to trust the decode."""
+        if self.last_frame_at is None:
+            return False
+        return (now - self.last_frame_at) <= LCD_STALE_S
 
 
 stats = _Stats()
@@ -87,17 +125,53 @@ _vesc: Optional[VescListener] = None
 def build_snapshot() -> Optional[dict]:
     """Build the dict written to units/{UNIT_ID}/current/snapshot.
 
-    Returns None if no frame has been decoded yet (e.g., the BMS hasn't
-    started talking, or we're still waiting for the first full sweep).
+    Returns None only when there is genuinely nothing to say — no Predator
+    frame AND no VESC telemetry.
+
+    This used to bail out whenever the Predator had never produced a frame,
+    which coupled the ENTIRE snapshot to the state of one peripheral: with
+    the Predator powered off, pack voltage, RPM and current from the VESC
+    never reached Firestore either, and the app showed a unit that looked
+    dead while the CAN bus was happily reporting 48.5 V. Observed on
+    UNIT-002 2026-08-04. The two data sources are independent and must fail
+    independently.
     """
-    if stats.last_raw_frame is None:
+    have_frame = stats.last_raw_frame is not None
+    have_vesc = _vesc is not None
+
+    if not have_frame and not have_vesc:
         return None
 
-    decoded = decode_frame(stats.last_raw_frame)
+    decoded = decode_frame(stats.last_raw_frame) if have_frame else None
 
     # Frame rate: completed frames over the publish window.
     elapsed = max(0.001, time.monotonic() - stats.frames_window_start)
     frame_rate_hz = round(stats.frames_decoded / elapsed, 2)
+
+    if decoded is None:
+        # Never saw a frame this process's lifetime. Publish the LCD fields
+        # as explicitly absent rather than omitting them, so a consumer can
+        # tell "Predator is dark" from "this Pi runs an old publisher".
+        snap: dict = {
+            "battery_soc":           None,
+            "dc_active":             False,
+            "ac_active":             False,
+            "output_mode":           "unknown",
+            "output_watts":          None,
+            "time_to_empty_minutes": None,
+            "time_to_full_minutes":  None,
+            "charging":              False,
+            "system_mode":           "unknown",
+            "lcd_frame_rate_hz":     frame_rate_hz,
+            "lcd_awake":             False,
+            "bmsFaults":             [],
+        }
+        if _vesc is not None:
+            for k, v in _vesc.snapshot().items():
+                snap[k] = v
+        stats.lcd_awake = False
+        stats.last_warnings = []
+        return snap
 
     snap: dict = {
         "battery_soc":           decoded["battery_soc"],
@@ -114,6 +188,30 @@ def build_snapshot() -> Optional[dict]:
         # we map LCD fault icons (low battery, overload, overheat, etc.).
         "bmsFaults":             [],
     }
+
+    # ── Staleness gate ────────────────────────────────────────────────────
+    # decode_frame() above ran against last_raw_frame, which is whatever
+    # arrived most recently — possibly minutes ago. The decoder cannot tell
+    # the difference; a stale frame decodes into a perfectly well-formed,
+    # perfectly wrong reading. Only the arrival time can, so the check
+    # belongs here rather than in the decoder.
+    #
+    # Note this is NOT the same condition as the decoder's blank-field
+    # check. A sleeping panel that still clocks blank frames decodes to
+    # None on its own; a panel switched fully dark stops transmitting
+    # entirely, and that is the case this catches.
+    fresh = stats.lcd_is_fresh(time.monotonic())
+    stats.lcd_awake = fresh
+    snap["lcd_awake"] = fresh
+    if not fresh:
+        for key in _LCD_DERIVED_FIELDS:
+            snap[key] = None
+        # output_mode/system_mode describe the LCD's own display state and
+        # are strings, so they get an explicit "unknown" rather than null —
+        # the app switches on them and a null would render as "off", which
+        # is a claim we cannot make about a panel we can't see.
+        snap["output_mode"] = "unknown"
+        snap["system_mode"] = "unknown"
 
     if PUBLISH_RAW:
         snap["raw_frame_hex"] = " ".join(f"{b:02X}" for b in stats.last_raw_frame)
@@ -196,6 +294,7 @@ def main() -> None:
                     if completed is not None:
                         stats.frames_decoded += 1
                         stats.last_raw_frame = completed
+                        stats.last_frame_at = now
                         if DEBUG:
                             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
                             hex_str = " ".join(f"{b:02X}" for b in completed)
@@ -209,8 +308,11 @@ def main() -> None:
             try:
                 snap = build_snapshot()
                 if snap is None:
+                    # Neither Predator nor VESC has anything — genuinely
+                    # nothing to publish.
                     if now - last_published > 10:
-                        print("[predator] no frames decoded yet (bus quiet?)", flush=True)
+                        print("[telemetry] no Predator frames and no VESC "
+                              "listener — nothing to publish", flush=True)
                     continue
                 publish(db, snap)
                 last_published = now
@@ -226,7 +328,13 @@ def main() -> None:
                 # While charging the output row is dark, so mode/watts/ttempty
                 # are all None by design; showing the charge ETA instead keeps
                 # the log line informative rather than a row of blanks.
-                if snap["system_mode"] == "charging":
+                if not snap.get("lcd_awake", True):
+                    # Say so plainly. The old log line printed a confident
+                    # `soc=84%` while `frames=0 rate=0.0Hz` sat right beside
+                    # it — all the evidence was on screen and still read as
+                    # a working unit.
+                    flow = "LCD DARK (all LCD-derived fields null)"
+                elif snap["system_mode"] == "charging":
                     flow = f"CHARGING  ttfull={snap['time_to_full_minutes']}m"
                 else:
                     flow = (
