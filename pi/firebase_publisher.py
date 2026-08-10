@@ -281,6 +281,7 @@ def main() -> None:
 
     assembler = FrameAssembler()
     last_published = 0.0
+    _overheat = pi_health.OverheatWatcher(db, UNIT_ID)
 
     with PassiveI2cSniffer() as sniff:
         for txn in sniff.transactions(timeout_s=PUBLISH_INTERVAL_S):
@@ -309,12 +310,19 @@ def main() -> None:
             try:
                 snap = build_snapshot()
                 if snap is not None:
+                    health = pi_health.snapshot()
                     # Host health is merged here rather than inside
                     # build_snapshot() so it lands on BOTH the normal path and
                     # the LCD-dark path — the Pi's own temperature is the one
                     # reading that stays meaningful when every peripheral has
                     # gone quiet, which is exactly when you want it.
-                    snap.update(pi_health.snapshot())
+                    snap.update(health)
+                    # Watch for a SUSTAINED crossing and emit an event the
+                    # notifier can act on. Publishing the temperature only
+                    # helps someone who is already looking; a unit in the
+                    # field has nobody looking.
+                    if _overheat is not None:
+                        _overheat.observe(health)
                 if snap is None:
                     # Neither Predator nor VESC has anything — genuinely
                     # nothing to publish.

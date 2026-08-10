@@ -65,6 +65,30 @@ const COPY: Record<string, { title: string; body: (payload: Record<string, unkno
     title: 'Out of fuel',
     body: () => 'The tank is empty — the generator can no longer run. Refuel to resume.',
   },
+  // Raspberry Pi host temperature. Emitted by pi/pi_health.py only on a
+  // SUSTAINED crossing (default 2 min) with hysteresis, so these are not
+  // chatty — a spike from sun on the enclosure will not reach here.
+  // `severity` is 'warn' at the threshold, 'critical' once the Pi is actually
+  // throttling or past its soft limit, and escalation re-notifies immediately
+  // because "it is throttling now" is new information.
+  'system.overheat': {
+    title: 'Controller overheating',
+    body: (p) => {
+      const t = typeof p.tempC === 'number' ? `${p.tempC.toFixed(1)}°C` : 'unknown';
+      const limit =
+        typeof p.thresholdC === 'number' ? ` (warn ${p.thresholdC}°C)` : '';
+      return p.severity === 'critical'
+        ? `Pi at ${t}${limit} and THROTTLING — performance is already degraded. Check airflow.`
+        : `Pi at ${t}${limit}. Rising; check airflow before it throttles.`;
+    },
+  },
+  'system.overheat.cleared': {
+    title: 'Controller temperature normal',
+    body: (p) =>
+      typeof p.tempC === 'number'
+        ? `Pi back down to ${p.tempC.toFixed(1)}°C.`
+        : 'Pi temperature back to normal.',
+  },
 };
 
 // Send one Telegram message. Best-effort: logs and swallows failures so a

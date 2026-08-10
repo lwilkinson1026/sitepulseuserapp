@@ -167,3 +167,126 @@ def snapshot() -> Dict[str, Any]:
 if __name__ == "__main__":
     import json
     print(json.dumps(snapshot(), indent=2, sort_keys=True))
+
+
+# ─── overheat watcher ──────────────────────────────────────────────────────
+
+# Sustained-crossing parameters. A generator sitting in the sun spikes; only a
+# sustained rise means something. All env-tunable so a field unit can be made
+# quieter without a deploy.
+SUSTAIN_S    = float(os.environ.get("SITEPULSE_PI_SUSTAIN_S", "120"))
+REALERT_S    = float(os.environ.get("SITEPULSE_PI_REALERT_S", "1800"))
+# Clear well below the warn point, not at it — otherwise a unit hovering on the
+# threshold alternates alert/clear forever.
+HYSTERESIS_C = float(os.environ.get("SITEPULSE_PI_HYSTERESIS_C", "5"))
+
+
+class OverheatWatcher:
+    """Emits `system.overheat` / `system.overheat.cleared` events.
+
+    Call observe() with a pi_health.snapshot() each publish cycle. State lives
+    in memory only: a restart re-arms, which is the safe direction — worst case
+    you get one duplicate alert on a genuinely hot unit, versus silence.
+
+    Event shape is `{kind, at, source, payload}` deliberately. The notifier
+    (functions/src/pushFanout.ts) reads `data.kind` and `data.payload`;
+    engine_supervisor writes `{type, message, data}` instead and is therefore
+    silently dropped by it. Do not copy that shape.
+    """
+
+    def __init__(self, db, unit_id: str) -> None:
+        self._db = db
+        self._unit_id = unit_id
+        self._hot_since: Optional[float] = None
+        self._cool_since: Optional[float] = None
+        self._alerting = False
+        self._last_alert_at: Optional[float] = None
+        self._last_severity: Optional[str] = None
+
+    def _severity(self, health: Dict[str, Any]) -> str:
+        temp = health.get("pi_temp_c")
+        throttling = bool(
+            health.get("pi_throttled_now")
+            or health.get("pi_soft_temp_limit_now")
+            or health.get("pi_freq_capped_now")
+        )
+        if throttling or (temp is not None and temp >= SOFT_LIMIT_C):
+            return "critical"
+        return "warn"
+
+    def _emit(self, kind: str, health: Dict[str, Any], severity: str) -> None:
+        try:
+            from firebase_admin import firestore as _fs
+            self._db.collection(f"units/{self._unit_id}/events").add({
+                "kind": kind,
+                "at": _fs.SERVER_TIMESTAMP,
+                "source": "pi",
+                "payload": {
+                    "tempC": health.get("pi_temp_c"),
+                    "thresholdC": WARN_C,
+                    "softLimitC": SOFT_LIMIT_C,
+                    "severity": severity,
+                    "throttling": bool(
+                        health.get("pi_throttled_now")
+                        or health.get("pi_soft_temp_limit_now")
+                        or health.get("pi_freq_capped_now")
+                    ),
+                    "loadAvg": health.get("pi_load_1min"),
+                },
+            })
+            print(f"[pi_health] emitted {kind} ({severity}) at "
+                  f"{health.get('pi_temp_c')} C", flush=True)
+        except Exception as e:
+            # Never let telemetry bookkeeping take down the publisher.
+            print(f"[pi_health] event emit failed for {kind}: {e!r}", flush=True)
+
+    def observe(self, health: Dict[str, Any], now: Optional[float] = None) -> None:
+        temp = health.get("pi_temp_c")
+        if temp is None:
+            return
+        import time as _time
+        now = now if now is not None else _time.monotonic()
+
+        if temp >= WARN_C:
+            self._cool_since = None
+            if self._hot_since is None:
+                self._hot_since = now
+            severity = self._severity(health)
+
+            if not self._alerting:
+                if now - self._hot_since >= SUSTAIN_S:
+                    self._alerting = True
+                    self._last_alert_at = now
+                    self._last_severity = severity
+                    self._emit("system.overheat", health, severity)
+                return
+
+            # Already alerting. Escalate warn -> critical immediately rather
+            # than waiting out the re-alert window; that transition means it is
+            # actively throttling now, which is new information.
+            if severity == "critical" and self._last_severity != "critical":
+                self._last_alert_at = now
+                self._last_severity = severity
+                self._emit("system.overheat", health, severity)
+            elif self._last_alert_at is not None and now - self._last_alert_at >= REALERT_S:
+                self._last_alert_at = now
+                self._emit("system.overheat", health, severity)
+            return
+
+        # Below the warn point.
+        self._hot_since = None
+        if not self._alerting:
+            return
+        if temp > WARN_C - HYSTERESIS_C:
+            # In the hysteresis band — neither hot nor recovered. Hold.
+            self._cool_since = None
+            return
+        if self._cool_since is None:
+            self._cool_since = now
+            return
+        if now - self._cool_since >= SUSTAIN_S:
+            self._alerting = False
+            self._last_alert_at = None
+            self._last_severity = None
+            self._cool_since = None
+            self._emit("system.overheat.cleared", health, "info")
