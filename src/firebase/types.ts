@@ -107,6 +107,38 @@ export interface TelemetrySnapshot {
   motor_wh?: number;               // cumulative watt-hours consumed
   motor_wh_charged?: number;       // cumulative watt-hours regenerated
 
+  // ── Raspberry Pi host health (pi/pi_health.py) ───────────────────────────
+  // All optional: a Pi running a publisher older than 2026-08-04 omits them
+  // entirely. Distinguish "old publisher" (key absent) from "sensor
+  // unavailable" (key present, null) — pi_health publishes null rather than
+  // dropping a key when a sensor can't be read.
+  //
+  // This exists because UNIT-002 ran at 85 C, throttled, with a core pinned
+  // at 100 %, for hours, and nothing surfaced it. The Predator reports itself
+  // over I2C and the VESC over CAN; the host running both was invisible.
+  pi_temp_c?: number | null;              // SoC temperature
+  pi_temp_rp1_adc_c?: number | null;      // RP1 southbridge
+  pi_load_1min?: number | null;
+  // Thresholds travel with the reading so the app and the notifier agree on
+  // what "hot" means without each hardcoding a number.
+  pi_temp_warn_c?: number;                // warn at/above this (default 75)
+  pi_temp_soft_limit_c?: number;          // Pi 5 soft-throttles here (85)
+  pi_temp_warn?: boolean;                 // precomputed: temp >= warn_c
+  // Decoded `vcgencmd get_throttled`. The *_now flags are live; the
+  // *_since_boot flags are sticky and clear only on reboot, so they answer a
+  // different question — "has this unit ever been in trouble". UNIT-001 shows
+  // undervoltage_since_boot with no live fault, which is a power-supply
+  // symptom invisible from a single spot reading.
+  pi_throttled_raw?: number | null;
+  pi_undervoltage_now?: boolean;
+  pi_freq_capped_now?: boolean;
+  pi_throttled_now?: boolean;
+  pi_soft_temp_limit_now?: boolean;
+  pi_undervoltage_since_boot?: boolean;
+  pi_freq_capped_since_boot?: boolean;
+  pi_throttled_since_boot?: boolean;
+  pi_soft_temp_limit_since_boot?: boolean;
+
   // System
   system_mode: SystemMode;
   last_update: Timestamp;          // server timestamp set by the Pi

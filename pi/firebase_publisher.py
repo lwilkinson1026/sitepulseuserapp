@@ -45,6 +45,7 @@ from typing import Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+import pi_health
 from predator_decoder import FrameAssembler, decode_frame
 from predator_i2c_sniffer import PassiveI2cSniffer
 from vesc_listener import VescListener
@@ -307,6 +308,13 @@ def main() -> None:
 
             try:
                 snap = build_snapshot()
+                if snap is not None:
+                    # Host health is merged here rather than inside
+                    # build_snapshot() so it lands on BOTH the normal path and
+                    # the LCD-dark path — the Pi's own temperature is the one
+                    # reading that stays meaningful when every peripheral has
+                    # gone quiet, which is exactly when you want it.
+                    snap.update(pi_health.snapshot())
                 if snap is None:
                     # Neither Predator nor VESC has anything — genuinely
                     # nothing to publish.

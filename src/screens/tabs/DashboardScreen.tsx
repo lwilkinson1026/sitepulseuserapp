@@ -455,6 +455,33 @@ export function DashboardScreen() {
     etaMinutes === null || etaMinutes === undefined
       ? '—'
       : `${Math.floor(etaMinutes / 60)}:${String(etaMinutes % 60).padStart(2, '0')}`;
+  // Controller health. `pi_temp_warn` is precomputed on the Pi so the app and
+  // the notifier can't disagree about what counts as hot. Fall back to a local
+  // comparison only if the flag is absent but a threshold was published.
+  const piHot =
+    snapshot.pi_temp_warn === true ||
+    (snapshot.pi_temp_warn === undefined &&
+      snapshot.pi_temp_c !== undefined &&
+      snapshot.pi_temp_c !== null &&
+      snapshot.pi_temp_warn_c !== undefined &&
+      snapshot.pi_temp_c >= snapshot.pi_temp_warn_c);
+  // Live throttling is the urgent signal; the sticky since-boot flags are a
+  // quieter "this unit has been in trouble before" note worth surfacing,
+  // because they are invisible from any single spot reading.
+  const piThrottlingNow =
+    snapshot.pi_throttled_now === true ||
+    snapshot.pi_soft_temp_limit_now === true ||
+    snapshot.pi_freq_capped_now === true;
+  const piHealthSub = snapshot.pi_undervoltage_now
+    ? 'UNDERVOLTAGE — check power supply'
+    : piThrottlingNow
+      ? 'THROTTLING NOW'
+      : snapshot.pi_undervoltage_since_boot
+        ? 'undervoltage seen since boot'
+        : snapshot.pi_throttled_since_boot || snapshot.pi_soft_temp_limit_since_boot
+          ? 'throttled earlier since boot'
+          : `load ${snapshot.pi_load_1min?.toFixed(2) ?? '—'}`;
+
   const chargeAmps = showChargeTile
     ? Math.abs(snapshot.motor_amps_in as number)
     : null;
@@ -556,6 +583,25 @@ export function DashboardScreen() {
               : 'LCD —'}
           </Text>
         </View>
+
+        {/* ── Controller health ─────────────────────────────────────
+            The Pi's own temperature. UNIT-002 spent hours at 85 C and
+            throttling with nothing surfacing it; the peripherals all
+            reported themselves while the host running them was invisible.
+            Rendered only when the Pi publishes it, so an older publisher
+            simply omits the group rather than showing an empty one. */}
+        {snapshot.pi_temp_c !== undefined && snapshot.pi_temp_c !== null && (
+          <View style={styles.metricGroup}>
+            <Eyebrow parts={['Controller', piHot ? 'HOT' : 'NOMINAL']} />
+            <View style={styles.metricRow}>
+              <Text style={[styles.metricBig, piHot ? styles.metricAlert : null]}>
+                {snapshot.pi_temp_c.toFixed(1)}
+              </Text>
+              <Text style={styles.metricUnit}>°C</Text>
+            </View>
+            <Text style={styles.metricSub}>{piHealthSub}</Text>
+          </View>
+        )}
 
         <View style={styles.actionGroup}>
           <SecondaryCTA
@@ -680,6 +726,9 @@ const styles = StyleSheet.create({
     fontFamily: fonts.mono,
     fontSize: typeScale.monoSM,
     letterSpacing: tracking.monoCaps,
+  },
+  metricAlert: {
+    color: colors.danger,
   },
   metricGroup: {
     gap: spacing.sm,
