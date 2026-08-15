@@ -3,7 +3,9 @@ import { Animated, Easing, StyleSheet, View, ViewStyle } from 'react-native';
 import { colors, motion } from '../theme';
 
 // 6-px green dot on a 1.6 s breath cycle (opacity 0.4 → 1.0 → 0.4).
-// Switches to amber when stale (>15 s) and red when offline (>60 s).
+// Switches to amber when stale and red when offline. The thresholds live in
+// useUnitTelemetry.ts, derived from the Pi's publish cadence — this component
+// only renders whichever state it is handed.
 // Stops pulsing when feed is stale or when prefers-reduced-motion is set.
 
 type LiveDotProps = {

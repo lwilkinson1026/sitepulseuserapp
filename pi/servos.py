@@ -43,7 +43,23 @@ from firebase_admin import firestore
 SERVO_NAMES = ("choke", "button", "ac")
 PWM_FREQ_HZ = 50          # standard hobby servo
 TICK_HZ = 50              # slew loop tick rate
-MIRROR_PERIOD_S = 1.0     # heartbeat for current/servos
+
+# How often the slew loop may mirror state to Firestore *while something is
+# actually moving*. 1 Hz is what makes the app's servo readout feel live
+# during a choke sweep or a button press.
+MIRROR_PERIOD_S = 1.0
+
+# How often to mirror when nothing has changed at all — a pure liveness
+# heartbeat.
+#
+# This distinction did not exist before 2026-08-15: the loop wrote
+# current/servos unconditionally every second, whether or not any value
+# differed, which is 86,400 writes/day/unit against a 20,000/day free-tier
+# ceiling. Servos are at rest essentially all the time, so almost every one
+# of those writes re-stated a value Firestore already held. This was the
+# single largest consumer in the system — larger than the telemetry
+# publisher it sat quietly beside.
+MIRROR_IDLE_PERIOD_S = 120.0
 
 
 # ─── lazy hardware import ──────────────────────────────────────────────────
@@ -199,17 +215,60 @@ def _slew_loop(db: firestore.Client, unit_id: str) -> None:
                 _drive(name, new_pos)
         now = time.monotonic()
         if now >= next_mirror:
-            try:
-                _mirror(db, unit_id)
-            except Exception as e:
-                print(f"[servos] mirror failed: {e}", flush=True)
+            # Advance the gate before attempting the write, so a failing
+            # mirror (offline, quota) retries on the next period rather than
+            # spinning on every tick.
             next_mirror = now + MIRROR_PERIOD_S
+            due = now - _last_mirror_at >= MIRROR_IDLE_PERIOD_S
+            if due or _current_signature() != _last_mirrored_sig:
+                try:
+                    _mirror(db, unit_id, now)
+                except Exception as e:
+                    print(f"[servos] mirror failed: {e}", flush=True)
 
 
 # ─── Firestore mirror ──────────────────────────────────────────────────────
 
-def _mirror(db: firestore.Client, unit_id: str) -> None:
-    """Snapshot live state to current/servos. Caller must NOT hold _lock."""
+# Value-identity of the last payload successfully written to current/servos,
+# and when. The slew loop compares against these to skip no-op writes; both
+# are only updated after a write actually lands, so a failed mirror is
+# retried rather than silently treated as published.
+_last_mirrored_sig: Optional[Tuple[Any, ...]] = None
+_last_mirror_at = 0.0
+
+
+def _current_signature() -> Tuple[Any, ...]:
+    """Signature of what _mirror would publish right now, for change
+    detection. Caller must NOT hold _lock."""
+    with _lock:
+        return (
+            tuple(
+                (
+                    name,
+                    round(_position[name], 4),
+                    round(_target[name], 4),
+                    _last_commanded_us.get(name, 0) > 0,
+                )
+                for name in SERVO_NAMES
+            ),
+            _last_command_at,
+        )
+
+
+def _mirror(
+    db: firestore.Client, unit_id: str, now: Optional[float] = None
+) -> None:
+    """Snapshot live state to current/servos. Caller must NOT hold _lock.
+
+    Unconditional by design — the command paths call this to publish a result
+    immediately. Rate limiting lives in the slew loop, not here.
+
+    `now` is the caller's monotonic reading. The slew loop passes the same
+    value it used to evaluate the gate, so the gate and the timestamp it
+    compares against always come from one clock read.
+    """
+    global _last_mirrored_sig, _last_mirror_at
+
     with _lock:
         snap = {
             name: {
@@ -220,11 +279,25 @@ def _mirror(db: firestore.Client, unit_id: str) -> None:
             for name in SERVO_NAMES
         }
         last_cmd_at = _last_command_at
+
+    # Derived from the same locked read as the payload, so the recorded
+    # signature always matches exactly what went to Firestore.
+    sig = (
+        tuple(
+            (name, snap[name]["position"], snap[name]["target"], snap[name]["attached"])
+            for name in SERVO_NAMES
+        ),
+        last_cmd_at,
+    )
+
     db.document(f"units/{unit_id}/current/servos").set({
         **snap,
         "lastCommandMonotonic": last_cmd_at,
         "updatedAt": firestore.SERVER_TIMESTAMP,
     }, merge=True)
+
+    _last_mirrored_sig = sig
+    _last_mirror_at = time.monotonic() if now is None else now
 
 
 # ─── lifecycle ─────────────────────────────────────────────────────────────

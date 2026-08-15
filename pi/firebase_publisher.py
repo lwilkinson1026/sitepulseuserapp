@@ -25,7 +25,8 @@ Setup on the Pi:
 Env vars:
     SITEPULSE_UNIT_ID              default UNIT-001
     SITEPULSE_SA                   path to service account JSON
-    SITEPULSE_INTERVAL             publish interval seconds, default 3
+    SITEPULSE_INTERVAL             publish interval seconds, default 15
+    SITEPULSE_LASTSEEN_INTERVAL    unit-doc heartbeat interval seconds, default 300
     SITEPULSE_PREDATOR_ADDR        I²C address to watch, default 0x3E
     SITEPULSE_PREDATOR_SDA_PIN     BCM GPIO for SDA, default 22
     SITEPULSE_PREDATOR_SCL_PIN     BCM GPIO for SCL, default 23
@@ -55,7 +56,31 @@ UNIT_ID            = os.environ.get("SITEPULSE_UNIT_ID", "UNIT-001")
 SERVICE_ACCOUNT    = os.path.expanduser(
     os.environ.get("SITEPULSE_SA", "~/sitepulse/service-account.json")
 )
-PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "3"))
+# Firestore bills — and the Spark plan hard-caps — per document write, not
+# per byte. At the original 3 s this loop wrote 2 documents every cycle:
+# 57,600 writes/day/unit against a 20,000/day free-tier ceiling. UNIT-002
+# exhausted the daily quota by 20:20 PT on 2026-08-14 and every write after
+# that returned `429 Quota exceeded`, which surfaces as the app silently
+# going stale while the Pi itself looks perfectly healthy.
+#
+# 15 s is a deliberate product call, not just a cost one: a generator's SoC,
+# output watts and pack voltage do not carry 3-second-resolution information.
+# Lower it temporarily (SITEPULSE_INTERVAL=3) when watching a crank sequence
+# live, but do not ship it that way.
+PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "15"))
+
+# The unit doc's `lastSeen` is a liveness heartbeat, not telemetry — and the
+# snapshot one level down already carries `last_update` stamped from the same
+# server clock. Writing both on every cycle doubled write volume to convey
+# nothing new. Decoupled here so the heartbeat stays coarse while telemetry
+# cadence can be tuned independently.
+#
+# 300 s is deliberately coarse: grepping src/ and functions/src/, `lastSeen`
+# appears only in a type declaration — nothing reads it. The app classifies
+# staleness from the snapshot's `last_update`. Tighten this only when
+# something actually consumes it.
+LASTSEEN_INTERVAL_S = float(os.environ.get("SITEPULSE_LASTSEEN_INTERVAL", "300"))
+
 WATCH_ADDRESS      = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 PUBLISH_RAW        = os.environ.get("SITEPULSE_PREDATOR_PUBLISH_RAW") == "1"
 
@@ -243,13 +268,28 @@ def init_firestore() -> firestore.Client:
     return firestore.client()
 
 
+# monotonic stamp of the last unit-doc heartbeat; 0.0 forces one on the
+# first publish so a freshly booted unit marks itself live immediately.
+_last_seen_written = 0.0
+
+
 def publish(db: firestore.Client, snap: dict) -> None:
+    global _last_seen_written
+
     snap["last_update"] = firestore.SERVER_TIMESTAMP
     db.document(f"units/{UNIT_ID}/current/snapshot").set(snap)
-    db.document(f"units/{UNIT_ID}").set(
-        {"lastSeen": firestore.SERVER_TIMESTAMP},
-        merge=True,
-    )
+
+    # Heartbeat on its own slower clock — see LASTSEEN_INTERVAL_S. Skipping
+    # it costs nothing: `last_update` on the snapshot above is written every
+    # cycle from the same server clock, so liveness is still derivable at
+    # full telemetry resolution.
+    now = time.monotonic()
+    if now - _last_seen_written >= LASTSEEN_INTERVAL_S:
+        db.document(f"units/{UNIT_ID}").set(
+            {"lastSeen": firestore.SERVER_TIMESTAMP},
+            merge=True,
+        )
+        _last_seen_written = now
 
 
 def _log_warnings_once(warnings: list[str]) -> None:
@@ -283,8 +323,15 @@ def main() -> None:
     last_published = 0.0
     _overheat = pi_health.OverheatWatcher(db, UNIT_ID)
 
+    # Wake at least once a second regardless of publish cadence. When the
+    # panel is dark no transactions arrive, so this timeout is the only thing
+    # driving the loop — if it equalled PUBLISH_INTERVAL_S, ordinary jitter
+    # would push the publish gate past its deadline and land on the *next*
+    # wakeup, silently halving the effective publish rate.
+    _tick_s = min(PUBLISH_INTERVAL_S, 1.0)
+
     with PassiveI2cSniffer() as sniff:
-        for txn in sniff.transactions(timeout_s=PUBLISH_INTERVAL_S):
+        for txn in sniff.transactions(timeout_s=_tick_s):
             now = time.monotonic()
 
             # Process whatever transactions arrived since the last loop.

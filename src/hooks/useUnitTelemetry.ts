@@ -6,10 +6,19 @@ import type { TelemetrySnapshot } from '../firebase/types';
 // Real-time subscription to units/{unitId}/current/snapshot.
 // Returns the latest telemetry plus a staleness signal driven by `last_update`.
 //
-// Staleness thresholds match spec §10.3 — live dot:
-//   fresh  : updated < 15 s ago
-//   stale  : 15–60 s ago (amber)
-//   offline: > 60 s ago   (red)
+// Staleness thresholds are derived from the Pi's publish cadence
+// (SITEPULSE_INTERVAL in pi/firebase_publisher.py), NOT from absolute time.
+// The original spec §10.3 values — 15 s / 60 s — assumed the 3 s cadence the
+// publisher shipped with. On 2026-08-15 that moved to 15 s to stay inside the
+// Firestore free-tier write quota, which put every healthy unit permanently
+// on the 15 s boundary and flickered the dot amber.
+//
+// Keep these as multiples of the publish interval so the two stay coupled:
+//   fresh  : < 3 intervals
+//   stale  : 3-10 intervals (amber)
+//   offline: > 10 intervals (red)
+//
+// If the Pi cadence changes again, change PUBLISH_INTERVAL_MS here to match.
 
 export type Staleness = 'fresh' | 'stale' | 'offline' | 'unknown';
 
@@ -20,8 +29,9 @@ export type UnitTelemetryState = {
   error: Error | null;
 };
 
-const STALE_AFTER_MS = 15_000;
-const OFFLINE_AFTER_MS = 60_000;
+const PUBLISH_INTERVAL_MS = 15_000;
+const STALE_AFTER_MS = PUBLISH_INTERVAL_MS * 3;    // 45 s
+const OFFLINE_AFTER_MS = PUBLISH_INTERVAL_MS * 10; // 150 s
 
 function ageMs(ts: Timestamp | null | undefined): number | null {
   if (!ts) return null;

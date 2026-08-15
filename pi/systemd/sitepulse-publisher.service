@@ -33,7 +33,7 @@ Environment=SITEPULSE_SA=/etc/sitepulse/service-account.json
 Environment=SITEPULSE_PREDATOR_SDA_PIN=22
 Environment=SITEPULSE_PREDATOR_SCL_PIN=23
 Environment=SITEPULSE_PREDATOR_ADDR=0x3E
-Environment=SITEPULSE_INTERVAL=3
+Environment=SITEPULSE_INTERVAL=15
 # Publish the raw 18-byte hex frame on every snapshot. Useful for ongoing
 # decoder development (SoC mapping, mode bits, fault icons). Remove once the
 # decoder is feature-complete to save bytes.
