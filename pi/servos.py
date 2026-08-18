@@ -39,6 +39,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
+import burst
+
 
 SERVO_NAMES = ("choke", "button", "ac")
 PWM_FREQ_HZ = 50          # standard hobby servo
@@ -435,6 +437,7 @@ def wake_lcd(
     db: firestore.Client,
     unit_id: str,
     press_duration_s: Optional[float] = None,
+    burst_publish: bool = False,
 ) -> None:
     """Press and release the LCD-wake button.
 
@@ -444,11 +447,25 @@ def wake_lcd(
 
     `press_duration_s` is clamped to [0.05, 2.0] for safety; None falls
     back to config/lcdWake.pressDurationSec.
+
+    `burst_publish` asks the telemetry publisher to raise its cadence for a
+    short window (see burst.py). It defaults to False and MUST stay that way
+    for the unattended loop: that loop presses every `intervalSec` — 240 s on
+    UNIT-002 — and a 90 s burst on each pass would cost roughly 40 writes per
+    cycle, about 14,400/day/unit. Two units of that overruns the same 20,000
+    /day Spark ceiling the 15 s baseline exists to stay under. Bursting is for
+    presses a human is actually waiting on.
     """
     global _last_command_at
     cfg = _load_config(db, unit_id)
     _ensure_initialized(cfg)
     _ensure_slew_running(db, unit_id)
+
+    if burst_publish:
+        # Signalled before the press, not after: the publisher's first burst
+        # tick should land while the panel is lighting up, so the frames that
+        # follow are carried out on the fast cadence rather than the slow one.
+        burst.request(f"lcd.wake {unit_id}")
 
     if press_duration_s is None:
         press_duration_s = float(
@@ -472,7 +489,14 @@ def handle_lcd_wake(
 ) -> None:
     """payload = {} or {pressDurationSec: 0.4}"""
     dur = payload.get("pressDurationSec")
-    wake_lcd(db, unit_id, float(dur) if dur is not None else None)
+    # Command path only — a person tapped "Wake LCD" and is watching for the
+    # readout to fill in. The unattended loop deliberately does not burst.
+    wake_lcd(
+        db,
+        unit_id,
+        float(dur) if dur is not None else None,
+        burst_publish=True,
+    )
 
 
 def _lcd_wake_loop(db: firestore.Client, unit_id: str) -> None:
