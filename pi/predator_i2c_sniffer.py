@@ -45,6 +45,37 @@ except ImportError:
     lgpio = None  # graceful fallback for off-Pi development / unit tests
 
 
+# ─── idle backoff ──────────────────────────────────────────────────────────
+# The poll loop below is a genuine spin loop: it reads two GPIOs and compares,
+# with nothing to rate-limit it. That is what we want while the Predator LCD
+# is talking, and catastrophic when it isn't — a dark panel produces no edges
+# at all, and the loop happily burns 100% of a core producing nothing. On
+# UNIT-002 that ran the Pi at 84 C with the soft-temp limit engaging, which in
+# turn degrades every timing-sensitive loop on the box, this one included.
+#
+# So: spin at full rate whenever the bus shows any sign of life, and drop to a
+# slow poll once it has been provably silent. The threshold has to clear the
+# gap *between* frames, not just between bytes — the panel frames at ~5.7 Hz,
+# so ~175 ms of quiet is normal mid-conversation. One second is comfortably
+# past that while still shedding the idle burn almost immediately.
+_BUS_IDLE_AFTER_S = float(os.environ.get("SITEPULSE_PREDATOR_IDLE_AFTER", "1.0"))
+
+# Poll interval once the bus is considered idle. At 1 ms this costs ~0.1% of a
+# core, and the worst case on wake is that we clip the first ~1 ms of the first
+# transaction. Harmless: the state machine only starts assembling on a START
+# condition, so a clipped transaction is discarded and the next frame — under
+# 200 ms later — decodes cleanly.
+#
+# Measured against a simulated bus (5 frames streamed at a loop already in
+# backoff): exactly one frame lost, the remaining four decoded byte-for-byte.
+# At the panel's ~5.7 Hz that is ~175 ms of extra latency on the first reading
+# after a wake, against a core's worth of heat saved the rest of the time.
+_IDLE_POLL_S = float(os.environ.get("SITEPULSE_PREDATOR_IDLE_POLL", "0.001"))
+
+# Consult the clock every N idle spins rather than on every one, so the hot
+# path stays two GPIO reads and two compares.
+_CLOCK_CHECK_SPINS = 2048
+
 SDA_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SDA_PIN", "22"))
 SCL_PIN          = int(os.environ.get("SITEPULSE_PREDATOR_SCL_PIN", "23"))
 GPIO_CHIP        = int(os.environ.get("SITEPULSE_PREDATOR_GPIO_CHIP", "0"))
@@ -174,6 +205,11 @@ class PassiveI2cSniffer:
         self._queue: queue.Queue[Transaction] = queue.Queue(maxsize=2048)
         self._state = _SnifferState(self._queue)
         self._stop_event = threading.Event()
+        # Open by default so anything constructing a sniffer directly — the
+        # CLI smoke test, lcd_calibrate.py — keeps watching continuously.
+        # Only the publisher closes it, and only between sample windows.
+        self._gate = threading.Event()
+        self._gate.set()
         self._poll_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
@@ -189,7 +225,13 @@ class PassiveI2cSniffer:
             we never get a stale view of one while looking at the other.
 
         At 9 kHz the bus has ~110 µs/bit; polling at ~100 kHz on a Pi 5 catches
-        every edge with margin.  CPU cost is ~5% of one core — negligible.
+        every edge with margin.
+
+        The CPU cost is NOT ~5% of a core, as this docstring claimed until
+        2026-08-18 — nothing rate-limits the loop, so it consumes an entire
+        core whenever it is spinning, measured at 99.2% on UNIT-002. That is
+        the price of full-rate polling while the bus is live, and it is why
+        _poll_loop backs off once the bus goes silent.
         """
         if self._handle is not None:
             return
@@ -220,29 +262,105 @@ class PassiveI2cSniffer:
 
     def _poll_loop(self) -> None:
         """Tight loop reading SDA + SCL, dispatching to the state machine on
-        every transition.  Single-threaded → no ordering races."""
+        every transition.  Single-threaded → no ordering races.
+
+        Spins at full rate while the bus is live and backs off to a slow poll
+        once it goes quiet — see the _BUS_IDLE_AFTER_S notes at module scope.
+        Edge fidelity while the panel is talking is unchanged: the backoff can
+        only engage after a full second with no transitions at all, which never
+        happens mid-conversation at the panel's ~5.7 Hz frame rate."""
         h = self._handle
         sda_pin = self._sda_pin
         scl_pin = self._scl_pin
         state = self._state
         read = lgpio.gpio_read   # local alias for speed
 
+        last_edge = time.monotonic()
+        idle = False
+        spins = 0
+
         while not self._stop_event.is_set():
+            if not self._gate.is_set():
+                # Closed sampling window. Block on the Event rather than
+                # polling it: costs nothing while shut and reopens the instant
+                # the publisher asks, with no scheduling latency of our own.
+                if not self._gate.wait(timeout=0.25):
+                    continue
+                # Resuming. Re-seed the line levels from hardware and drop any
+                # half-decoded transaction — the bus moved on while we weren't
+                # looking, so a level compare against a pre-pause snapshot
+                # would invent an edge, and a partial byte would decode as
+                # nonsense. The state machine needs a fresh START anyway.
+                state.sda_level = read(h, sda_pin)
+                state.scl_level = read(h, scl_pin)
+                state.in_txn = False
+                state.cur_txn = None
+                state.bit_pos = 0
+                state.byte_acc = 0
+                state.bit_count = 0
+                state.first_byte = True
+                last_edge = time.monotonic()
+                idle = False
+                spins = 0
+                continue
+
             sda = read(h, sda_pin)
             scl = read(h, scl_pin)
 
             # Process SCL changes first.  The state machine for SCL rising
             # samples SDA via the fresh `sda` value we just read.
+            changed = False
             if scl != state.scl_level:
                 _on_scl_edge(state, scl, sda)
+                changed = True
             if sda != state.sda_level:
                 _on_sda_edge(state, sda, scl)
+                changed = True
+
+            if changed:
+                # Any activity at all drops us straight back to full rate;
+                # the very next edge of a waking panel is caught at speed.
+                idle = False
+                spins = 0
+                last_edge = time.monotonic()
+                continue
+
+            if idle:
+                time.sleep(_IDLE_POLL_S)
+                continue
+
+            spins += 1
+            if spins >= _CLOCK_CHECK_SPINS:
+                spins = 0
+                if time.monotonic() - last_edge >= _BUS_IDLE_AFTER_S:
+                    idle = True
+
+    def set_sampling(self, active: bool) -> None:
+        """Open or close the sampling window.
+
+        The poll loop is a spin loop by necessity — a 9 kHz bit-banged bus
+        needs sampling far faster than any sleep granularity allows — so while
+        it is open it costs a full core. On UNIT-002 that meant 99% CPU and a
+        board sitting at 84 C against an 85 C soft limit, twenty-four hours a
+        day, to serve a reading published every 15 seconds.
+
+        Closing it between publishes is the difference. The publisher opens the
+        window a couple of seconds before it intends to publish, takes its
+        sample, and shuts it again.
+        """
+        if active:
+            self._gate.set()
+        else:
+            self._gate.clear()
 
     def stop(self) -> None:
         h = self._handle
         if h is None:
             return
         self._stop_event.set()
+        # Release the loop if it is parked on a closed gate, so join() below
+        # doesn't wait out the full gate timeout on shutdown.
+        self._gate.set()
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=2.0)
             self._poll_thread = None
