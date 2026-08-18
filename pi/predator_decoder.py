@@ -63,6 +63,7 @@ short-circuits the engine recharge loop into idle).
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Optional, TypedDict
 
 
@@ -470,32 +471,135 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
 
 # ─── Frame assembly from raw I²C transactions ─────────────────────────────
 
+# A register may be this many sweeps old and still be used to fill a gap.
+# Sweeps run at ~7 Hz, so 15 caps a carried-over value at roughly two seconds
+# — far tighter than the 15 s publish interval it feeds, and far tighter than
+# the rate at which any of these quantities physically change.
+MAX_REGISTER_AGE_SWEEPS = 15
+
+# The display block is registers 0x00..0x11. Higher addresses appear on the
+# bus occasionally (0x12, 0x16, 0x1A, 0x1C, 0x1E, 0x20 were all observed on
+# UNIT-002) and are not part of the sweep.
+_DISPLAY_REGS = range(0x12)
+
+
 class FrameAssembler:
     """Accumulates per-register writes into 18-byte snapshots.
 
-    The sniffer feeds in one transaction at a time via `feed()`.  A complete
-    frame is emitted when the register number rolls back to a lower value
-    (the BMS writes 0x00..0x11 in order, then loops).  The assembler stays
-    forgiving: a stray write to an unexpected register is accepted, and we
-    only emit a snapshot once we've seen all 18 registers since the last
-    rollover.
+    The BMS writes registers 0x00..0x11 in ascending order and then loops, so
+    a frame boundary is a register address that steps backwards.
+
+    This originally required all 18 registers to arrive within a single sweep.
+    On a clean bus that is fine; on this tap it never completes. The sniffer is
+    a passive bit-banged listener and loses roughly a quarter of transactions
+    (28% measured on UNIT-002, 2026-08-18), which puts the odds of eighteen
+    specific registers all surviving one sweep near zero — across 171
+    consecutive sweeps not one was complete, and the best was still short by
+    two. The publisher reported `frames=0` with every LCD-derived field null,
+    which is indistinguishable from a sleeping panel and was misread as one for
+    weeks.
+
+    So values now carry across sweeps: the assembler keeps the most recent
+    value for each register and emits once it holds all eighteen, provided none
+    is staler than MAX_REGISTER_AGE_SWEEPS. That is sound here specifically
+    because the frame carries no checksum and each register decodes
+    independently (see decode_frame) — combining a register captured one sweep
+    ago with one captured now invalidates nothing. On a protocol with a frame
+    checksum this would be the wrong shape entirely.
     """
 
     def __init__(self) -> None:
-        self._cur: dict[int, int] = {}
+        self._latest: dict[int, int] = {}
+        self._seen_at: dict[int, int] = {}
         self._prev_reg: Optional[int] = None
+        self._sweep = 0
 
     def feed(self, reg: int, val: int) -> Optional[list[int]]:
-        """Feed one (register, value) pair.  Returns the completed 18-byte
-        snapshot (list indexed 0..17) when a frame boundary is crossed and
-        the previous frame had all 18 registers; otherwise None."""
+        """Feed one (register, value) pair.  Returns an 18-byte snapshot
+        (list indexed 0..17) at each frame boundary where every register is
+        present and recent enough; otherwise None."""
+        if reg not in _DISPLAY_REGS:
+            # Ignored rather than stored: a stray high address arriving
+            # mid-sweep would otherwise make the next legitimate register look
+            # like a frame boundary and split one sweep into two.
+            return None
+
         snapshot: Optional[list[int]] = None
         if self._prev_reg is not None and reg < self._prev_reg:
-            # Frame boundary: register number wrapped back to a lower value.
-            if len(self._cur) >= 18 and set(self._cur.keys()) >= set(range(0x12)):
-                snapshot = [self._cur[i] for i in range(0x12)]
-            self._cur = {}
+            snapshot = self._build()
+            self._sweep += 1
 
-        self._cur[reg] = val
+        self._latest[reg] = val
+        self._seen_at[reg] = self._sweep
         self._prev_reg = reg
         return snapshot
+
+    def _build(self) -> Optional[list[int]]:
+        cutoff = self._sweep - MAX_REGISTER_AGE_SWEEPS
+        for reg in _DISPLAY_REGS:
+            if reg not in self._latest or self._seen_at[reg] < cutoff:
+                return None
+        return [self._latest[reg] for reg in _DISPLAY_REGS]
+
+
+# ─── Majority decode across a sample window ────────────────────────────────
+
+# Fields voted on independently. `warnings` is excluded — it is diagnostic
+# text, not a reading, and is unioned instead.
+_VOTED_FIELDS = (
+    "battery_soc",
+    "dc_active",
+    "ac_active",
+    "output_mode",
+    "output_watts",
+    "time_to_empty_minutes",
+    "time_to_full_minutes",
+    "charging",
+    "system_mode",
+)
+
+
+def decode_frames_majority(frames: list[list[int]]) -> Optional[DecodedFrame]:
+    """Decode every frame captured in one sample window and return the
+    per-field majority value.
+
+    The tap is passive and bit-banged, and loses or corrupts a meaningful
+    share of what it sees. Publishing the single newest frame — which is what
+    this module's caller did until 2026-08-18 — hands that corruption straight
+    through to the app: UNIT-002 showed SoC alternating 0/6/null and the AC
+    outlet apparently switching itself on and off every fifteen seconds while
+    nobody was touching it.
+
+    Corruption here is random per byte rather than systematic, so the same
+    field decoded across ~15-20 frames of one window agrees on the true value
+    far more often than on any particular wrong one. Voting per field rather
+    than per frame matters: a frame is rarely corrupt as a whole, so discarding
+    whole frames would throw away good bytes alongside bad ones.
+
+    A field with no non-None reading in the entire window stays None, which is
+    the honest answer — better a blank than a number nobody should trust.
+    Returns None only when handed nothing at all.
+    """
+    if not frames:
+        return None
+
+    decoded = [decode_frame(f) for f in frames]
+
+    out: dict = {}
+    for field in _VOTED_FIELDS:
+        values = [d[field] for d in decoded if d[field] is not None]
+        if not values:
+            out[field] = None
+            continue
+        # Counter.most_common breaks ties by insertion order, i.e. by the
+        # earliest frame in the window — deterministic rather than arbitrary.
+        out[field] = Counter(values).most_common(1)[0][0]
+
+    seen: list[str] = []
+    for d in decoded:
+        for w in d["warnings"]:
+            if w not in seen:
+                seen.append(w)
+    out["warnings"] = seen
+
+    return out  # type: ignore[return-value]
