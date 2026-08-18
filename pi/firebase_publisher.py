@@ -46,8 +46,9 @@ from typing import Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+import burst
 import pi_health
-from predator_decoder import FrameAssembler, decode_frame
+from predator_decoder import FrameAssembler, decode_frame, decode_frames_majority
 from predator_i2c_sniffer import PassiveI2cSniffer
 from vesc_listener import VescListener
 
@@ -80,6 +81,22 @@ PUBLISH_INTERVAL_S = float(os.environ.get("SITEPULSE_INTERVAL", "15"))
 # staleness from the snapshot's `last_update`. Tighten this only when
 # something actually consumes it.
 LASTSEEN_INTERVAL_S = float(os.environ.get("SITEPULSE_LASTSEEN_INTERVAL", "300"))
+
+# How long the I²C tap actually watches the bus before each publish.
+#
+# The sniffer is a spin loop — a 9 kHz bit-banged bus cannot be sampled any
+# other way — so it costs a full core for every second it is open. Leaving it
+# open permanently ran UNIT-002 at 99% CPU and 84 C against an 85 C soft limit,
+# around the clock, to produce one reading every 15 s.
+#
+# Sized off the frame rate, not picked round. The panel sweeps its registers at
+# ~7 Hz, so the window length sets how many votes decode_frames_majority() gets.
+# 2 s was measured on UNIT-002 to yield anywhere from 9 to 27 frames — the low
+# end is too thin to outvote the tap's bit errors reliably, and showed up as
+# output_mode still flapping off/DC/AC+DC between publishes while soc, watts and
+# runway had already gone steady. 3 s buys roughly half again as many votes for
+# ~20% duty instead of 13%, which is noise next to the 99% this replaced.
+SAMPLE_WINDOW_S    = float(os.environ.get("SITEPULSE_SAMPLE_WINDOW", "3.0"))
 
 WATCH_ADDRESS      = int(os.environ.get("SITEPULSE_PREDATOR_ADDR", "0x3E"), 0)
 PUBLISH_RAW        = os.environ.get("SITEPULSE_PREDATOR_PUBLISH_RAW") == "1"
@@ -123,6 +140,10 @@ class _Stats:
         self.frames_window_start = time.monotonic()
         self.last_warnings: list[str] = []
         self.last_raw_frame: Optional[list[int]] = None
+        # Every frame completed inside the current sample window. The snapshot
+        # is voted across these rather than taken from the newest one — see
+        # decode_frames_majority(). Cleared when a window opens.
+        self.window_frames: list[list[int]] = []
         # Monotonic stamp of the last COMPLETED frame. None until the first
         # one lands. Deliberately not reset by reset() — it tracks the bus,
         # not the publish window.
@@ -168,7 +189,15 @@ def build_snapshot() -> Optional[dict]:
     if not have_frame and not have_vesc:
         return None
 
-    decoded = decode_frame(stats.last_raw_frame) if have_frame else None
+    # Vote across the window when we have one. stats.last_raw_frame is the
+    # fallback for the first publish after startup, before any window has
+    # closed — one frame is still better than none.
+    if stats.window_frames:
+        decoded = decode_frames_majority(stats.window_frames)
+    elif have_frame:
+        decoded = decode_frame(stats.last_raw_frame)
+    else:
+        decoded = None
 
     # Frame rate: completed frames over the publish window.
     elapsed = max(0.001, time.monotonic() - stats.frames_window_start)
@@ -323,6 +352,14 @@ def main() -> None:
     last_published = 0.0
     _overheat = pi_health.OverheatWatcher(db, UNIT_ID)
 
+    # Seeded from whatever is already on disk so a publisher restart part-way
+    # through somebody else's burst doesn't read as a fresh press.
+    _burst_token, _ = burst.state()
+
+    # Whether the tap is currently open. Starts open so the very first publish
+    # after startup has something to say instead of a guaranteed null cycle.
+    sampling = True
+
     # Wake at least once a second regardless of publish cadence. When the
     # panel is dark no transactions arrive, so this timeout is the only thing
     # driving the loop — if it equalled PUBLISH_INTERVAL_S, ordinary jitter
@@ -344,15 +381,53 @@ def main() -> None:
                         stats.frames_decoded += 1
                         stats.last_raw_frame = completed
                         stats.last_frame_at = now
+                        stats.window_frames.append(completed)
                         if DEBUG:
                             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
                             hex_str = " ".join(f"{b:02X}" for b in completed)
                             print(f"[{stamp}] frame: {hex_str}", flush=True)
 
+            # A wake press means somebody is holding the phone right now,
+            # watching for the panel to come back. Raise the cadence for a
+            # short window rather than making them wait out the remainder of
+            # a 15 s interval that exists purely to conserve write quota.
+            token, burst_left = burst.state()
+            if token != _burst_token:
+                _burst_token = token
+                # Publish on this very tick. The LCD needs a moment to light
+                # and the decoder a frame or two to resync, so this first one
+                # usually still carries nulls — but it restarts the clock at
+                # the burst cadence, so the real values land seconds later
+                # instead of up to a full interval later.
+                last_published = 0.0
+                print(
+                    f"[burst] wake signalled — publishing every "
+                    f"{burst.INTERVAL_S:g}s for {burst.WINDOW_S:g}s",
+                    flush=True,
+                )
+
             # Periodic publish — independent of inbound transactions so we
             # always heartbeat even if the bus stalls.
-            if now - last_published < PUBLISH_INTERVAL_S:
+            interval = burst.INTERVAL_S if burst_left > 0 else PUBLISH_INTERVAL_S
+
+            # Open the tap shortly before we intend to publish, so the frames
+            # we vote over are the ones describing the panel *now* rather than
+            # whatever it showed a publish-interval ago.
+            if not sampling and (interval - (now - last_published)) <= SAMPLE_WINDOW_S:
+                stats.window_frames = []
+                sniff.set_sampling(True)
+                sampling = True
+
+            if now - last_published < interval:
                 continue
+
+            # Deadline reached: shut the tap before doing any Firestore work.
+            # Everything the snapshot needs is already in stats.window_frames,
+            # and closing here rather than after the publish means a Firestore
+            # timeout — which can block for 60 s — doesn't hold a core open.
+            if sampling:
+                sniff.set_sampling(False)
+                sampling = False
 
             try:
                 snap = build_snapshot()
