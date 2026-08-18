@@ -121,7 +121,7 @@ const REASON_LABEL: Record<NonNullable<EngineState['reason']>, string> = {
 };
 
 export function ScheduleScreen() {
-  const { unitId } = useActiveUnit();
+  const { unitId, unit } = useActiveUnit();
   const { user } = useAuth();
   const chargeConfig = useUnitDoc<ChargeConfig>(unitId, 'config', 'charge');
   // The supervisor's actual thresholds live here, not on config/charge —
@@ -329,7 +329,17 @@ export function ScheduleScreen() {
             (pack voltage from the VESC). Approximate SoC % is shown in
             small text as a sanity-check translation via vescVoltsToSoc. */}
         <View style={styles.section}>
-          <Eyebrow parts={['Thresholds', 'LiFePO4 14S · pack V']} />
+          {/* Derived from the unit doc rather than hardcoded. This read
+              "LiFePO4 14S" long after the fleet settled on 15S (2026-08-04),
+              on the one screen whose whole job is explaining what a pack
+              voltage means — a stale cell count here misreads every threshold
+              below it by a full volt per cell. */}
+          <Eyebrow
+            parts={[
+              'Thresholds',
+              `LiFePO4 ${unit?.cellCount ? `${unit.cellCount}S` : '—'} · pack V`,
+            ]}
+          />
           <ThresholdRow
             label="ENGINE STARTS BELOW"
             volts={voltageStart}

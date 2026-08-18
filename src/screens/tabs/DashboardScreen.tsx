@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CornerBrackets, Eyebrow, FigCaption, FuelAlertBanner, Screen, SecondaryCTA } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
@@ -15,7 +15,6 @@ import {
   wakeLcd,
 } from '../../firebase/commands';
 import { confirm } from '../../lib/confirm';
-import { vescVoltsToSoc } from '../../lib/voltageSoc';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../../theme';
 import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 
@@ -34,23 +33,6 @@ import { useActiveUnit } from '../../hooks/ActiveUnitContext';
 // in Firestore, this is a build-time gate, not authorization — anyone with
 // a custom build of the app could flip it. It's strictly UX hygiene.
 const ADMIN_MODE = process.env.EXPO_PUBLIC_ADMIN_MODE === 'true';
-
-// How long the dashboard keeps showing the last Predator-LCD SoC reading
-// after `battery_soc` goes null in the snapshot. The Pi's I²C decoder
-// occasionally drops a frame even while the LCD is awake, and without
-// stickiness the displayed number flips to the voltage fallback (which
-// itself jitters under load) on every dropped frame. 20 s comfortably
-// covers normal frame gaps without delaying a real LCD-asleep handoff
-// to the voltage estimate by more than a few snapshot ticks.
-const LCD_STICKY_MS = 20_000;
-
-// EMA weight applied to the voltage-derived SoC each snapshot. The charge
-// loop modulates motor_amps_in between -10 A and 0 A every few seconds,
-// so the IR-compensated voltage estimate moves ±10–15 %/sample even though
-// the underlying pack state is barely changing. Lower α = heavier smoothing.
-// α = 0.15 + a ~2-5 s snapshot cadence ≈ a 30 s effective window — enough
-// to absorb the charge-loop ripple without lagging real changes for long.
-const VESC_SOC_EMA_ALPHA = 0.15;
 
 // Charge-tune stepper bounds. Hard ceiling on the Pi is 50 A; we cap the
 // app side a hair below so the user never lands exactly on the clamp and
@@ -117,36 +99,6 @@ export function DashboardScreen() {
   // double-taps from queueing two presses back-to-back.
   const [wakeBusy, setWakeBusy] = useState(false);
   const [acBusy, setAcBusy] = useState(false);
-
-  // Hooks for the SoC display logic MUST be declared up here, before any
-  // early return — React's rules-of-hooks. The actual derivation (which
-  // requires a non-null snapshot) lives below the early returns and just
-  // reads the ref / state set up here.
-  const lcdMemRef = useRef<{ value: number; seenAt: number } | null>(null);
-  const [smoothedVescSoc, setSmoothedVescSoc] = useState<number | null>(null);
-  const cellCount = unit?.cellCount;
-  useEffect(() => {
-    if (!snapshot) return;
-    // cellCount scales the per-cell SoC curve to this unit's pack. While it is
-    // still loading (or absent on an older unit doc) this returns null and the
-    // voltage fallback simply doesn't display, which is the right outcome —
-    // reading a full 14S pack against the 15S curve would show ~50 %.
-    const sample = vescVoltsToSoc(snapshot.motor_volts, {
-      cellCount,
-      ampsIn: snapshot.motor_amps_in,
-    });
-    if (sample === null) return;
-    setSmoothedVescSoc((prev) =>
-      prev === null
-        ? sample
-        : Math.round(
-            VESC_SOC_EMA_ALPHA * sample + (1 - VESC_SOC_EMA_ALPHA) * prev,
-          ),
-    );
-    // cellCount belongs here: the unit doc resolves a beat after the first
-    // telemetry snapshot, so without it this closure keeps the initial
-    // `undefined` and the SoC estimate stays blank until the next snapshot.
-  }, [snapshot, cellCount]);
 
   const onWakePress = async () => {
     if (!user || !unitId || wakeBusy) return;
@@ -399,33 +351,24 @@ export function DashboardScreen() {
     );
   }
 
-  // SOC display priority: LCD reading first (accurate when fresh); fall
-  // back to EMA-smoothed VESC-voltage-derived estimate so we always have
-  // *something* to show when the Predator LCD is asleep. Hooks for both
-  // paths are declared at the top of the component; this block just reads
-  // the ref / state and updates the LCD memory.
+  // State of charge has exactly one source: what the Predator's own LCD
+  // reports. No blank is filled in, and no second estimate stands in.
   //
-  // Sticky LCD memory: keep showing the last non-null LCD value for
-  // LCD_STICKY_MS after battery_soc goes null in the snapshot. Without
-  // this, a single dropped I²C frame would swap the display from the
-  // LCD path to the voltage path (and back next snapshot), making the
-  // hero number look like it's cycling between several values.
+  // This used to be three layers deep — LCD value, then a 20 s sticky memory
+  // of the last one, then a voltage-derived estimate — and both extra layers
+  // were compensating for the same thing: the Pi's I²C tap dropped frames, so
+  // the number visibly cycled between sources. That is fixed at the source now
+  // (the publisher votes each reading across a whole sample window), so the
+  // scaffolding can go.
+  //
+  // Dropping the voltage estimate is not only a simplification. Measured on
+  // UNIT-002 2026-08-18: the panel read 6 % while the voltage curve claimed
+  // 13 % at 46.9 V — a 7-point overestimate on a nearly-empty pack, in the
+  // direction that tells someone they have range they do not have. A blank is
+  // a better answer than a confident wrong one.
   const live = snapshot.battery_soc;
-  if (typeof live === 'number' && Number.isFinite(live)) {
-    lcdMemRef.current = { value: live, seenAt: Date.now() };
-  }
-  const lcdMem = lcdMemRef.current;
-  const lcdFresh =
-    lcdMem !== null && Date.now() - lcdMem.seenAt < LCD_STICKY_MS;
-  const lcdSoc = lcdFresh ? lcdMem!.value : null;
-
-  const usingVescFallback = lcdSoc === null && smoothedVescSoc !== null;
   const socStr =
-    lcdSoc !== null
-      ? fmt(lcdSoc, 0)
-      : usingVescFallback
-        ? String(smoothedVescSoc)
-        : '—';
+    typeof live === 'number' && Number.isFinite(live) ? fmt(live, 0) : '—';
   const stalenessKind =
     staleness === 'fresh' ? 'fresh' : staleness === 'stale' ? 'stale' : 'offline';
 
@@ -511,7 +454,7 @@ export function DashboardScreen() {
             <Text style={styles.heroUnit}>%</Text>
           </View>
           <Text style={styles.heroSub}>
-            STATE OF CHARGE{usingVescFallback ? '  (APPROX)' : ''}  ·{' '}
+            STATE OF CHARGE  ·{' '}
             {wallCharging
               ? `CHARGING  ·  ${etaStr} TO FULL`
               : `${snapshot.output_mode.toUpperCase()}  ·  ${fmt(snapshot.output_watts, 0)} W`}
