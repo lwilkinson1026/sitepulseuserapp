@@ -1,31 +1,7 @@
-import React from 'react';
-import { ActivityIndicator, Platform, StyleSheet, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-
-// On web, expo-font's runtime registration isn't reliably picking up
-// the bundled Inter / JetBrains Mono assets, so we side-load Google Fonts
-// and alias them to the Expo key names. Native builds are unaffected.
-if (Platform.OS === 'web' && typeof document !== 'undefined') {
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href =
-    'https://fonts.googleapis.com/css2?' +
-    'family=Inter:wght@400;500;600;900&' +
-    'family=JetBrains+Mono:wght@400;500&display=swap';
-  document.head.appendChild(link);
-
-  const style = document.createElement('style');
-  style.textContent = `
-    @font-face { font-family: 'Inter_400Regular';  src: local('Inter'); font-weight: 400; }
-    @font-face { font-family: 'Inter_500Medium';   src: local('Inter'); font-weight: 500; }
-    @font-face { font-family: 'Inter_600SemiBold'; src: local('Inter'); font-weight: 600; }
-    @font-face { font-family: 'Inter_900Black';    src: local('Inter'); font-weight: 900; }
-    @font-face { font-family: 'JetBrainsMono_400Regular'; src: local('JetBrains Mono'); font-weight: 400; }
-    @font-face { font-family: 'JetBrainsMono_500Medium';  src: local('JetBrains Mono'); font-weight: 500; }
-  `;
-  document.head.appendChild(style);
-}
 import {
   Inter_400Regular,
   Inter_500Medium,
@@ -46,19 +22,34 @@ import { colors } from './src/theme';
 
 ensureFirebase();
 
+// Type is cosmetic. Past this point we render with whatever the platform gives
+// us rather than leave the operator looking at a spinner.
+const FONT_GRACE_MS = 3000;
+
 export default function App() {
-  const [interLoaded] = useInter({
+  const [interLoaded, interError] = useInter({
     Inter_400Regular,
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_900Black,
   });
-  const [monoLoaded] = useJetBrains({
+  const [monoLoaded, monoError] = useJetBrains({
     JetBrainsMono_400Regular,
     JetBrainsMono_500Medium,
   });
 
-  if (!interLoaded || !monoLoaded) {
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setGraceElapsed(true), FONT_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // `useFonts` reports failure through its second slot. Treat an error as
+  // settled — a missing typeface must never gate sign-in.
+  const fontsSettled =
+    (interLoaded || interError) && (monoLoaded || monoError);
+
+  if (!fontsSettled && !graceElapsed) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color={colors.textMuted} />
