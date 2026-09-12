@@ -283,6 +283,19 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             "tickIntervalSec":      15,
             "actionCooldownSec":    60,
             "respectQuietHours":    True,
+
+            # Cold-start crank retry. A cold engine typically needs two
+            # cranks to fire, so a single failed_no_catch is re-cranked
+            # after a starter-rest pause instead of being left for manual
+            # review. crankRetryMax = EXTRA attempts after the first.
+            "crankRetryMax":        2,
+            "crankRetryDelaySec":   10,
+            # False-catch window: if the charge loop reports
+            # failed_engine_bogged within this many seconds of the
+            # supervisor's own auto-start and the engine reads stopped,
+            # re-crank (shares the budget above). Keep ≥ charge.rampUpSec,
+            # since the bog check only arms after the ramp.
+            "bogRetryWindowSec":    120,
         },
     },
     "charge": {

@@ -309,6 +309,15 @@ export interface EngineSupervisorConfig {
   tickIntervalSec: number;
   actionCooldownSec: number;
   respectQuietHours: boolean;
+
+  // Cold-start crank retry. A cold engine typically needs two cranks to
+  // fire; the Pi re-cranks after a failed_no_catch instead of leaving the
+  // failed state for manual review. crankRetryMax = EXTRA attempts after
+  // the first. bogRetryWindowSec covers the "fired briefly then died"
+  // case (failed_engine_bogged shortly after auto-start).
+  crankRetryMax?: number;
+  crankRetryDelaySec?: number;
+  bogRetryWindowSec?: number;
 }
 
 export interface EngineChargeConfig {
