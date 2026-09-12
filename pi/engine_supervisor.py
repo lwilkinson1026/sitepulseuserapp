@@ -16,7 +16,10 @@ fallback), then evaluates:
   enabled == false                                  → no-op (manual mode)
   in cooldown after recent action                   → no-op (back-off window)
   state == starting | cranking | stopping           → no-op (action in flight)
-  state startswith "failed"                         → no-op (manual review)
+  state == failed_engine_bogged, within
+    bogRetryWindowSec of our own auto-start,
+    engine confirmed stopped, retry budget left      → re-crank ("false catch")
+  state startswith "failed" (anything else)         → no-op (manual review)
   state == charging                                 → no-op (charge loop owns it)
 
   state == idle, soc <= socCritical,
@@ -43,6 +46,26 @@ restart immediately.
 Auto-start cycle blocks on handle_engine_start until catch or failure,
 then immediately fires handle_engine_charge (which spawns the bg charge
 loop and returns).
+
+Cold-start crank retry
+----------------------
+A cold engine routinely needs two cranks to fire. One crank is a
+maxDurationSec (~4 s) burst; if it ends in failed_no_catch / failed_no_load
+the supervisor waits crankRetryDelaySec and cranks again, up to
+crankRetryMax extra attempts, all inside the same _auto_start_cycle call
+(so the retry lands well within 30 s of the first miss — the tick interval
+and action cooldown never get a chance to delay it).
+
+The retry budget is shared with the "false catch" path: the crank loop can
+declare "running" on an engine that fired for a moment and died, in which
+case the charge loop is what eventually notices (failed_engine_bogged once
+its rampUpSec safety window arms). If that happens within bogRetryWindowSec
+of our own auto-start, the engine is confirmed stopped (snapshot motor_rpm
+at/below stop.rpmIdleThreshold) and budget remains, the supervisor re-cranks
+on the next tick — cooldown is bypassed for this one case. Failures the
+supervisor didn't cause (a manual start that missed) are never retried, and
+once the budget is spent the failed state is left for manual review exactly
+as before.
 
 Coexists with manual mode
 -------------------------
@@ -110,6 +133,20 @@ DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
     "tickIntervalSec":       15,
     # After firing any auto-action, ignore further triggers for this long.
     "actionCooldownSec":     60,
+
+    # Cold-start crank retry. A cold engine typically needs two cranks to
+    # fire, so a single failed_no_catch is not a fault — re-crank after a
+    # short starter-cooling pause. crankRetryMax is the number of EXTRA
+    # attempts after the first (2 → three cranks total). Budget is per
+    # auto-start cycle and is shared with the false-catch path below.
+    "crankRetryMax":         2,
+    "crankRetryDelaySec":    10,
+    # False-catch window. If the charge loop reports failed_engine_bogged
+    # within this many seconds of our auto-start, treat it as an engine
+    # that fired briefly and died, and re-crank (engine must read stopped
+    # first). Must cover engine.charge.rampUpSec, since the charge loop's
+    # bog check only arms after the ramp.
+    "bogRetryWindowSec":     120,
     # Honor config/charge.quietHours when deciding whether to start.
     # socCritical override still applies if allowQuietOverride=true.
     "respectQuietHours":     True,
@@ -122,6 +159,11 @@ DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
 # drifted anyway — the two disagreed by 10 points at 49.5 V — and the
 # pack-volt form produced nonsense on the real 14S packs. Both problems are
 # structural, so the curve now lives once, per cell, in voltage_soc.py.
+
+
+# Crank outcomes that mean "turned over, didn't fire" — a cold engine, not a
+# fault. Anything else (failed_error, failed_low_voltage, …) is left alone.
+RETRYABLE_CRANK_STATES = ("failed_no_catch", "failed_no_load")
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -154,6 +196,11 @@ class EngineSupervisor:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_action_at: float = 0.0  # monotonic
+        # Crank-retry bookkeeping for the current auto-start cycle. Reset
+        # every time a fresh (non-retry) auto-start fires from idle.
+        self._auto_start_at: Optional[float] = None   # monotonic, last attempt
+        self._retries_used: int = 0
+        self._last_retry_guard_warn_at: float = float("-inf")
         # Track whether we've emitted the "enabled" / "disabled" log line
         # so we don't spam on every tick.
         self._last_enabled_state: Optional[bool] = None
@@ -202,6 +249,12 @@ class EngineSupervisor:
     # ── per-tick logic ────────────────────────────────────────────────────
 
     def _tick(self, cfg: Dict[str, Any]) -> None:
+        # A re-crank after a false catch is the one action allowed through
+        # the cooldown: the cooldown exists to stop us thrashing on
+        # thresholds, and this isn't a threshold decision — it's finishing
+        # the start we already committed to. Cheap when nothing is pending.
+        if self._maybe_retry_after_bog(cfg):
+            return
         if self._in_cooldown(cfg):
             return
 
@@ -215,7 +268,9 @@ class EngineSupervisor:
         # Action-in-flight states: don't touch anything.
         if state in ("starting", "cranking", "stopping"):
             return
-        # Failure states need manual review — supervisor doesn't auto-recover.
+        # Failure states need manual review — supervisor doesn't auto-recover
+        # (the one exception, a false catch right after our own auto-start,
+        # was handled by _maybe_retry_after_bog above).
         if state and state.startswith("failed"):
             return
         # Charge loop owns its lifetime.
@@ -256,11 +311,11 @@ class EngineSupervisor:
         if state in (None, "idle"):
             # 1. Critical SoC — fires even in quiet hours if user allowed it.
             if soc <= soc_critical and (not in_quiet or allow_quiet_override):
-                self._auto_start_cycle(soc, soc_source, ttempty, "critical_soc")
+                self._auto_start_cycle(soc, soc_source, ttempty, "critical_soc", cfg)
                 return
             # 2. Normal low-SoC trigger.
             if soc <= soc_start and not in_quiet:
-                self._auto_start_cycle(soc, soc_source, ttempty, "low_soc")
+                self._auto_start_cycle(soc, soc_source, ttempty, "low_soc", cfg)
                 return
             # 3. Load-aware proactive start: short runway AND already somewhat
             #    depleted. The ceiling prevents firing on transient spikes
@@ -271,7 +326,7 @@ class EngineSupervisor:
                 and soc <= proactive_lim
                 and not in_quiet
             ):
-                self._auto_start_cycle(soc, soc_source, ttempty, "load_aware")
+                self._auto_start_cycle(soc, soc_source, ttempty, "load_aware", cfg)
                 return
             return
 
@@ -303,17 +358,27 @@ class EngineSupervisor:
         soc_source: str,
         ttempty: Optional[int],
         reason: str,
+        cfg: Dict[str, Any],
+        is_retry: bool = False,
     ) -> None:
-        """engine.start (synchronous) → if caught, engine.charge (async).
-        Single-action with a chained charge so we're not waiting an entire
-        tick interval to begin loading the engine.
+        """engine.start (synchronous, re-cranked on a miss) → if caught,
+        engine.charge (async). Single-action with a chained charge so we're
+        not waiting an entire tick interval to begin loading the engine.
 
-        `reason` is one of: critical_soc, low_soc, load_aware. Goes into
-        the event feed so the user can see why each auto-start fired.
+        `reason` is one of: critical_soc, low_soc, load_aware, or
+        retry_after_bog. Goes into the event feed so the user can see why
+        each auto-start fired. `is_retry` keeps the cycle's retry budget
+        instead of resetting it.
         """
         # Import lazily so this module imports cleanly on a Mac without
         # the Pi hardware deps.
         from engine import handle_engine_start, handle_engine_charge
+
+        max_retries = max(0, int(cfg.get("crankRetryMax", 2)))
+        retry_delay = max(0.0, float(cfg.get("crankRetryDelaySec", 10)))
+
+        if not is_retry:
+            self._retries_used = 0
 
         msg_runway = f", runway={ttempty}m" if ttempty is not None else ""
         self._log_event(
@@ -325,31 +390,73 @@ class EngineSupervisor:
                 "socSource":  soc_source,
                 "ttempty":    ttempty,
                 "reason":     reason,
+                "attempt":    self._retries_used + 1,
             },
         )
-        self._last_action_at = time.monotonic()
-        try:
-            handle_engine_start(self.db, self.unit_id, {})
-        except Exception as e:
-            self._log_event(
-                "engine.auto_start_failed",
-                f"Auto-start raised: {e}",
-                "warning",
-                {"soc": soc, "reason": reason, "error": str(e)},
-            )
-            print(f"[supervisor] auto_start failed: {e!r}", flush=True)
-            return
 
-        # Did it catch?
-        state = self._read_engine_state()
-        if state != "running":
+        while True:
+            attempt = self._retries_used + 1
+            self._last_action_at = time.monotonic()
+            self._auto_start_at  = self._last_action_at
+            try:
+                handle_engine_start(self.db, self.unit_id, {})
+            except Exception as e:
+                self._log_event(
+                    "engine.auto_start_failed",
+                    f"Auto-start raised: {e}",
+                    "warning",
+                    {"soc": soc, "reason": reason, "attempt": attempt, "error": str(e)},
+                )
+                print(f"[supervisor] auto_start failed: {e!r}", flush=True)
+                return
+
+            # Did it catch?
+            state = self._read_engine_state()
+            if state == "running":
+                break
+
+            if state in RETRYABLE_CRANK_STATES and self._retries_used < max_retries:
+                # Cold engine, no fire yet — this is the normal two-crank
+                # cold start, not a fault. Let the starter rest, then go again.
+                self._retries_used += 1
+                self._log_event(
+                    "engine.auto_start_retry",
+                    f"Crank {attempt} ended {state}; re-cranking in {retry_delay:.0f}s "
+                    f"(retry {self._retries_used} of {max_retries})",
+                    "info",
+                    {
+                        "endState":    state,
+                        "attempt":     attempt,
+                        "retry":       self._retries_used,
+                        "maxRetries":  max_retries,
+                        "delaySec":    retry_delay,
+                        "reason":      reason,
+                    },
+                )
+                print(
+                    f"[supervisor] crank {attempt} → {state}; retry {self._retries_used}/{max_retries} "
+                    f"in {retry_delay:.0f}s",
+                    flush=True,
+                )
+                if self._stop_event.wait(retry_delay):
+                    return
+                continue
+
             # start macro publishes the failure state itself; we just log
             # that the catch never happened so the event feed has both signals.
+            exhausted = state in RETRYABLE_CRANK_STATES
             self._log_event(
                 "engine.auto_start_no_catch",
-                f"Engine.start completed but state={state!r} (no catch)",
+                f"Engine.start completed but state={state!r} (no catch) after {attempt} "
+                f"crank{'s' if attempt != 1 else ''}"
+                + ("; retry budget exhausted, leaving for manual review" if exhausted else ""),
                 "warning",
-                {"endState": state, "reason": reason},
+                {
+                    "endState":   state,
+                    "reason":     reason,
+                    "attempts":   attempt,
+                    "exhausted":  exhausted,
+                },
             )
             return
 
@@ -370,6 +477,76 @@ class EngineSupervisor:
                 {"soc": soc, "error": str(e)},
             )
             print(f"[supervisor] auto_charge after start failed: {e!r}", flush=True)
+
+    def _maybe_retry_after_bog(self, cfg: Dict[str, Any]) -> bool:
+        """False-catch recovery. The crank loop can report "running" for an
+        engine that fired for a second and died; the charge loop then finds
+        it via failed_engine_bogged once its ramp-in safety window arms.
+        If that lands within bogRetryWindowSec of OUR auto-start, the engine
+        reads stopped, and retry budget remains, re-crank.
+
+        Returns True if a retry was issued (caller should end the tick).
+        Deliberately conservative: unknown RPM → no crank. Cranking a
+        genuinely stopped engine is what a human would do next; cranking
+        one that is still spinning is not.
+        """
+        if self._auto_start_at is None:
+            return False
+        window      = max(0.0, float(cfg.get("bogRetryWindowSec", 120)))
+        max_retries = max(0, int(cfg.get("crankRetryMax", 2)))
+        elapsed     = time.monotonic() - self._auto_start_at
+        if elapsed > window or self._retries_used >= max_retries:
+            return False
+
+        state, telem = self._read_engine_telemetry()
+        if state != "failed_engine_bogged":
+            return False
+
+        rpm = telem.get("motor_rpm")
+        stopped_rpm = self._load_stopped_rpm()
+        if rpm is None or rpm > stopped_rpm:
+            now = time.monotonic()
+            if now - self._last_retry_guard_warn_at > 60.0:
+                self._last_retry_guard_warn_at = now
+                self._log_event(
+                    "engine.auto_start_retry_skipped",
+                    f"Engine bogged {elapsed:.0f}s after auto-start but motor_rpm={rpm!r} "
+                    f"(need ≤{stopped_rpm} to confirm stopped); not re-cranking",
+                    "warning",
+                    {"motorRpm": rpm, "stoppedRpm": stopped_rpm, "sinceStartSec": round(elapsed, 1)},
+                )
+            return False
+
+        self._retries_used += 1
+        self._log_event(
+            "engine.auto_start_retry",
+            f"Engine bogged and stopped {elapsed:.0f}s after auto-start (false catch); "
+            f"re-cranking (retry {self._retries_used} of {max_retries})",
+            "info",
+            {
+                "endState":      state,
+                "retry":         self._retries_used,
+                "maxRetries":    max_retries,
+                "sinceStartSec": round(elapsed, 1),
+                "motorRpm":      rpm,
+                "reason":        "retry_after_bog",
+            },
+        )
+        print(
+            f"[supervisor] false catch (bogged {elapsed:.0f}s after start, rpm={rpm}); "
+            f"retry {self._retries_used}/{max_retries}",
+            flush=True,
+        )
+        soc, soc_source = self._resolve_soc(telem)
+        self._auto_start_cycle(
+            soc if soc is not None else -1,
+            soc_source or "unknown",
+            telem.get("ttempty"),
+            "retry_after_bog",
+            cfg,
+            is_retry=True,
+        )
+        return True
 
     def _auto_charge(self, soc: int, soc_source: str) -> None:
         """Engine is already running unloaded → load it."""
@@ -498,6 +675,21 @@ class EngineSupervisor:
             pass
         return 49.0
 
+    def _load_stopped_rpm(self) -> int:
+        """RPM at/below which the engine counts as stopped. Reuses
+        engine.stop.rpmIdleThreshold so "stopped" means the same thing to
+        the stop primitive and to the false-catch retry guard."""
+        try:
+            snap = self.db.document(f"units/{self.unit_id}/config/engine").get()
+            if snap.exists:
+                stop_block = (snap.to_dict() or {}).get("stop", {})
+                raw = stop_block.get("rpmIdleThreshold", 100)
+                if isinstance(raw, (int, float)) and raw >= 0:
+                    return int(raw)
+        except Exception:
+            pass
+        return 100
+
     def _load_allow_quiet_override(self) -> bool:
         try:
             snap = self.db.document(f"units/{self.unit_id}/config/charge").get()
@@ -528,6 +720,7 @@ class EngineSupervisor:
           ttempty          Optional[int]    Predator time_to_empty_minutes
           output_watts     Optional[int]    Predator inverter output watts
           motor_volts      Optional[float]  VESC pack voltage (fallback signal)
+          motor_rpm        Optional[int]    VESC ERPM — "is the engine actually turning"
         """
         state: Optional[str] = None
         telem: Dict[str, Any] = {
@@ -535,6 +728,7 @@ class EngineSupervisor:
             "ttempty":      None,
             "output_watts": None,
             "motor_volts":  None,
+            "motor_rpm":    None,
             "charging":     False,
         }
         try:
@@ -559,6 +753,9 @@ class EngineSupervisor:
                 v = d.get("motor_volts")
                 if isinstance(v, (int, float)):
                     telem["motor_volts"] = float(v)
+                rpm = d.get("motor_rpm")
+                if isinstance(rpm, (int, float)):
+                    telem["motor_rpm"] = abs(int(rpm))
                 telem["charging"] = d.get("charging") is True
         except Exception:
             pass
