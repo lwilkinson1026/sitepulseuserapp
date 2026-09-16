@@ -638,20 +638,20 @@ class EngineSupervisor:
         """Press the Predator LCD wake button right before reading telemetry,
         so battery_soc and time_to_empty are guaranteed fresh.
 
-        Best-effort. If the servo or any dependency fails (e.g. tests on a
-        Mac without hardware), swallow and move on — the periodic lcd-wake
+        Best-effort. If the button presser or any dependency fails (e.g.
+        tests on a Mac without hardware), swallow and move on — the periodic lcd-wake
         loop is a separate safety net, and the voltage fallback will catch
         the supervisor's decisions if both fail.
         """
         try:
-            from servos import wake_lcd  # lazy import (Pi-only deps)
+            from buttons import wake_lcd  # lazy import (Pi-only deps)
             wake_lcd(self.db, self.unit_id)
             # Give the BMS + I²C sniffer + publisher a moment to land
             # fresh frames into the snapshot.
             time.sleep(1.0)
         except Exception as e:
             # Throttle: log once per 10 minutes so this can't spam if the
-            # servo is broken.
+            # presser is broken.
             now = time.monotonic()
             if (now - getattr(self, "_last_lcd_wake_warn_at", 0.0)) > 600.0:
                 self._last_lcd_wake_warn_at = now

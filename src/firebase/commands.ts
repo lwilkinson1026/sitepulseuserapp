@@ -99,7 +99,8 @@ export function stopCameraStream(unitId: string, uid: string) {
 
 // ── LCD wake button (phase E.2) ─────────────────────────────────────────
 // Triggers a single press-and-release of the Predator's LCD wake button
-// via the PCA9685 ch2 servo. `pressDurationSec` overrides the default
+// via a GPIO-driven optocoupler across the button's pads (pi/buttons.py).
+// `pressDurationSec` overrides the default
 // (config/lcdWake.pressDurationSec) for this one press only — leave it
 // undefined to use the configured default.
 export function wakeLcd(unitId: string, uid: string, pressDurationSec?: number) {
@@ -110,7 +111,7 @@ export function wakeLcd(unitId: string, uid: string, pressDurationSec?: number) 
 
 // ── AC outlet toggle (phase E.3) ────────────────────────────────────────
 // Triggers a single press-and-release of the Predator's AC power button
-// via the PCA9685 ch3 servo. Each press *flips* the AC outlet state
+// via a GPIO-driven optocoupler (pi/buttons.py). Each press *flips* the AC outlet state
 // (on→off or off→on); the Pi has no way to know which direction it went.
 // Callers should be ready for either outcome.
 export function toggleAc(unitId: string, uid: string, pressDurationSec?: number) {

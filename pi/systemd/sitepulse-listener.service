@@ -20,9 +20,9 @@ Type=simple
 User=sitepulse
 Group=sitepulse
 # See sitepulse-publisher.service for what each group is for. The listener
-# needs all of them: it drives the relay HAT and override pin (gpio), the
-# PCA9685 servos (i2c), the CAN HAT for engine crank (spi), and the camera
-# for sentry + streaming (video).
+# needs all of them: it drives the relay HAT, override pin and the panel
+# button presser (gpio), the PCA9685 choke servo (i2c), the CAN HAT for
+# engine crank (spi), and the camera for sentry + streaming (video).
 SupplementaryGroups=gpio i2c spi video dialout
 WorkingDirectory=/opt/sitepulse/current
 
@@ -34,6 +34,9 @@ Environment=SITEPULSE_SA=/etc/sitepulse/service-account.json
 # Not '-' prefixed on purpose: see the longer note in the publisher unit.
 # It matters even more here — a listener that fell back to the default
 # UNIT-001 would take another unit's commands and crank the wrong engine.
+# Panel button presser pins (BCM) default to GPIO 24 = LCD wake and
+# GPIO 16 = AC toggle. Override per unit in unit.env with
+# SITEPULSE_BTN_LCD_PIN / SITEPULSE_BTN_AC_PIN if a unit is wired differently.
 EnvironmentFile=/etc/sitepulse/unit.env
 
 ExecStart=/usr/bin/python3 -u /opt/sitepulse/current/command_listener.py
