@@ -110,9 +110,8 @@ export function DashboardScreen() {
       // action. If this becomes user-facing, lift into a toast.
       console.warn('[dashboard] wakeLcd failed', e);
     } finally {
-      // Leave the button disabled briefly so the servo has time to
-      // physically complete its press-release cycle before the user can
-      // queue another.
+      // Leave the button disabled briefly so the Pi's press-release cycle
+      // (up to 2 s hold) completes before the user can queue another.
       setTimeout(() => setWakeBusy(false), 1200);
     }
   };

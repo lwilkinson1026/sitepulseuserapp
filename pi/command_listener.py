@@ -99,8 +99,10 @@ HANDLERS: Dict[str, Handler] = {
     "servo.set":         _lazy("servos",  "handle_servo_set",         "servo.set"),
     "servo.preset":      _lazy("servos",  "handle_servo_preset",      "servo.preset"),
     "servo.update":      _lazy("servos",  "handle_servo_update",      "servo.update"),
-    "lcd.wake":          _lazy("servos",  "handle_lcd_wake",          "lcd.wake"),
-    "ac.toggle":         _lazy("servos",  "handle_ac_toggle",         "ac.toggle"),
+    # Phase E.2/E.3 — panel buttons. GPIO → PC817 presses since 2026-09-15
+    # (were PCA9685 servo arms); same command names, same payloads.
+    "lcd.wake":          _lazy("buttons", "handle_lcd_wake",          "lcd.wake"),
+    "ac.toggle":         _lazy("buttons", "handle_ac_toggle",         "ac.toggle"),
     # Phase G.2 — VESC starter cranking (low-level, no choke/spark management)
     "engine.crank":      _lazy("engine",  "handle_engine_crank",      "engine.crank"),
     # Phase G.3 — full engine start choreography: choke → spark → crank → settle
@@ -237,8 +239,11 @@ def _start_background_services(db: firestore.Client) -> None:
         ("servos.start_servos", lambda: __import__(
             "servos", fromlist=["start_servos"]
         ).start_servos(db, UNIT_ID)),
-        ("servos.start_lcd_wake_loop", lambda: __import__(
-            "servos", fromlist=["start_lcd_wake_loop"]
+        ("buttons.start_buttons", lambda: __import__(
+            "buttons", fromlist=["start_buttons"]
+        ).start_buttons(db, UNIT_ID)),
+        ("buttons.start_lcd_wake_loop", lambda: __import__(
+            "buttons", fromlist=["start_lcd_wake_loop"]
         ).start_lcd_wake_loop(db, UNIT_ID)),
         ("engine.init_engine", lambda: __import__(
             "engine", fromlist=["init_engine"]
@@ -295,6 +300,13 @@ def main() -> None:
             _servos_detach()
         except Exception as e:
             _log(f"shutdown: servos.detach_all failed: {e}")
+        # Release the button-presser GPIOs so nothing is left held "pressed"
+        # and the bench tool can claim them.
+        try:
+            from buttons import release_all as _buttons_release
+            _buttons_release()
+        except Exception as e:
+            _log(f"shutdown: buttons.release_all failed: {e}")
         _log("listener stopped")
 
 
