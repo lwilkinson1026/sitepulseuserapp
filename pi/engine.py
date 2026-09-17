@@ -140,6 +140,11 @@ DEFAULT_START_CONFIG: Dict[str, Any] = {
     "sparkSettleMs":           200,           # pause between spark on and crank
     "postCatchSettleMs":       2000,          # pause between catch and run-choke
     "turnOffSparkOnFailure":   True,
+    # The choke servo is retired fleet-wide (2026-09-17): cold starts are
+    # handled by the supervisor's multiple crank attempts instead, and the
+    # PCA9685 is no longer fitted. With this false the start sequence skips
+    # every choke step. Set it true on a unit that has a choke servo again.
+    "chokeEnabled":            False,
 }
 
 
@@ -564,11 +569,14 @@ def handle_engine_start(
     unit_id: str,
     payload: Dict[str, Any],
 ) -> None:
-    """Full engine start choreography: choke → spark → crank → (on catch)
-    open choke, (on failure) reset choke + spark off.
+    """Full engine start choreography: [choke →] spark → crank → (on catch)
+    [open choke], (on failure) [reset choke +] spark off. The choke steps run
+    only when config/engine.start.chokeEnabled is true; it defaults to false
+    now that cold starts rely on repeated crank attempts.
 
     payload (all optional):
       chokePreset            — override start.chokePreset for this attempt
+                               (ignored when start.chokeEnabled is false)
       currentAmpsOverride    — passed through to the crank step
       maxDurationSecOverride — passed through to the crank step
     """
@@ -592,23 +600,54 @@ def handle_engine_start(
         spark_settle_s    = max(0.0, float(start_cfg["sparkSettleMs"])) / 1000.0
         post_catch_s      = max(0.0, float(start_cfg["postCatchSettleMs"])) / 1000.0
         turn_off_spark    = bool(start_cfg["turnOffSparkOnFailure"])
+        choke_enabled     = bool(start_cfg.get("chokeEnabled", False))
+
+        def _choke(preset: str) -> None:
+            """Set the choke, or do nothing on a unit without one."""
+            if choke_enabled:
+                _set_choke_safely(db, unit_id, preset)
 
         sequence_started_at = time.monotonic()
 
-        # 1. Choke to cranking position
+        # 1. Choke to cranking position, 2. spark relay on.
+        #
+        # Both steps sit inside one guard. Before 2026-09-17 they had none:
+        # a choke servo that was unplugged raised out of step 1 *after*
+        # "starting" had been published and *before* any handler existed, so
+        # current/engine said "starting" forever and the app's Start button
+        # appeared to freeze. Any pre-crank failure now lands in failed_error
+        # with the phase it died in, exactly like a crank failure does.
+        phase = "choke_setting" if choke_enabled else "choke_skipped"
         _publish_state(db, unit_id, "starting", {
             "startedAt":            firestore.SERVER_TIMESTAMP,
-            "phase":                "choke_setting",
-            "chokePreset":          choke_preset,
+            "phase":                phase,
+            "chokePreset":          choke_preset if choke_enabled else None,
             "currentAmpsCommanded": crank_params["current_amps"],
         })
-        _set_choke_safely(db, unit_id, choke_preset)
-        time.sleep(choke_settle_s)
+        try:
+            if choke_enabled:
+                _choke(choke_preset)
+                time.sleep(choke_settle_s)
 
-        # 2. Spark relay on
-        _publish_state(db, unit_id, "starting", {"phase": "spark_on"})
-        _set_spark_safely(db, unit_id, spark_channel, "on")
-        time.sleep(spark_settle_s)
+            phase = "spark_on"
+            _publish_state(db, unit_id, "starting", {"phase": phase})
+            _set_spark_safely(db, unit_id, spark_channel, "on")
+            time.sleep(spark_settle_s)
+        except Exception as e:
+            print(f"[engine.start] pre-crank step {phase!r} raised: {e!r}", flush=True)
+            if turn_off_spark:
+                try:
+                    _set_spark_safely(db, unit_id, spark_channel, "off")
+                except Exception as se:
+                    print(f"[engine.start] spark off failed: {se!r}", flush=True)
+            detail = str(e)
+            if phase == "choke_setting":
+                detail = (
+                    f"choke servo not responding ({e}). Reconnect the servo "
+                    f"board, or set config/engine.start.chokeEnabled=false."
+                )
+            _publish_state(db, unit_id, "failed_error", {"error": detail, "phase": phase})
+            raise
 
         # 3. Crank
         _publish_state(db, unit_id, "cranking", {
@@ -624,7 +663,7 @@ def handle_engine_start(
             # Crank raised — best-effort cleanup before bubbling up.
             print(f"[engine.start] crank raised: {e!r}; resetting choke + spark", flush=True)
             try:
-                _set_choke_safely(db, unit_id, fail_choke_preset)
+                _choke(fail_choke_preset)
             except Exception as ce:
                 print(f"[engine.start] choke reset failed: {ce!r}", flush=True)
             if turn_off_spark:
@@ -649,7 +688,7 @@ def handle_engine_start(
             })
             time.sleep(post_catch_s)
             try:
-                _set_choke_safely(db, unit_id, run_choke_preset)
+                _choke(run_choke_preset)
             except Exception as e:
                 print(f"[engine.start] run-choke set failed: {e!r}", flush=True)
             _publish_state(db, unit_id, "running", {
@@ -665,7 +704,7 @@ def handle_engine_start(
         else:
             # Crank failed (timeout / no load). Reset choke + spark, propagate state.
             try:
-                _set_choke_safely(db, unit_id, fail_choke_preset)
+                _choke(fail_choke_preset)
             except Exception as e:
                 print(f"[engine.start] choke reset failed: {e!r}", flush=True)
             if turn_off_spark:

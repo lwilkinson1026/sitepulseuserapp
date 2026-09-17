@@ -287,7 +287,13 @@ def start_servos(db: firestore.Client, unit_id: str) -> None:
     """Init hardware, drive to defaultOnStart, start slew thread."""
     global _last_command_at
     cfg = _load_config(db, unit_id)
-    _ensure_initialized(cfg)
+    try:
+        _ensure_initialized(cfg)
+    except (ValueError, OSError) as e:
+        # No PCA9685 on the bus. Normal since the choke servo was retired
+        # (2026-09-17); say so once, calmly, instead of failing the service.
+        print(f"[servos] no servo board on the bus ({e}); choke servo disabled", flush=True)
+        return
     with _lock:
         for name in SERVO_NAMES:
             start = _default_on_start[name]

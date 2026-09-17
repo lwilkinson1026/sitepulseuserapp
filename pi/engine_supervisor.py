@@ -118,8 +118,20 @@ DEFAULT_SUPERVISOR_CONFIG: Dict[str, Any] = {
     # under current load is short — we'd just have to immediately restart.
     "sustainableRunwayMin":  180,   # only stop if runway ≥ this OR no load
 
-    # Voltage fallback for when LCD is asleep AND battery_soc is null in
-    # the snapshot. PACK volts, so they only mean anything alongside a cell
+    # Whether a null battery_soc may be replaced by an estimate from pack
+    # voltage. OFF by default, and it should stay off until the curve is
+    # validated against a real pack. On 2026-09-17 UNIT-001, LCD dark, the
+    # estimate read 24 % from 49.5 V on a pack the panel showed at 85-100 %,
+    # and the supervisor tried to auto-start the engine five times on it; the
+    # only thing that stopped it was an unrelated fault in the start sequence.
+    # LiFePO4 is flat across most of its range, so resting voltage says very
+    # little about charge. UNIT-002 has run with this removed since its
+    # 2026-08-26 hotfix, which this finally ports. With it off, a dark panel
+    # means "no SoC, take no action", and the pre-tick LCD wake is what gets
+    # a real reading.
+    "voltageFallbackEnabled": False,
+
+    # Thresholds for that fallback, used only when it is enabled. PACK volts, so they only mean anything alongside a cell
     # count — 3.200 and 3.100 V/cell on the fleet's 14S packs. Derive them
     # with voltage_soc.pack_threshold() rather than typing numbers; a pack
     # voltage written without its cell count is the bug that left UNIT-002
@@ -278,9 +290,11 @@ class EngineSupervisor:
             return
 
         # Resolve SoC from best available source.
+        self._voltage_fallback = bool(cfg.get("voltageFallbackEnabled", False))
         soc, soc_source = self._resolve_soc(telem)
         if soc is None:
-            # Neither Predator nor VESC fallback has data — wait next tick.
+            # No trustworthy SoC this tick (panel dark and the voltage
+            # fallback off, or no data at all) — take no action, wait.
             return
 
         soc_start    = int(cfg.get("socStart",    25))
@@ -776,8 +790,10 @@ class EngineSupervisor:
 
         Predator LCD-derived `battery_soc` is the primary because the
         Predator BMS coulomb-counts internally — load IR sag doesn't fool
-        it. Falls back to VESC voltage on this unit's per-cell LiFePO4
-        curve when battery_soc is null (LCD asleep, or servo wake failed).
+        it. Only when config `voltageFallbackEnabled` is true does a null
+        battery_soc fall back to VESC voltage on the per-cell LiFePO4 curve;
+        by default a dark panel yields (None, None) and the caller does
+        nothing. See the note on that key for why.
 
         The fallback compensates for internal-resistance offset using
         `motor_amps_in` when it's available, so a decision made mid-charge
@@ -788,6 +804,8 @@ class EngineSupervisor:
         soc = telem.get("battery_soc")
         if soc is not None:
             return int(soc), "predator"
+        if not getattr(self, "_voltage_fallback", False):
+            return None, None
         v = telem.get("motor_volts")
         if v is not None:
             est = voltage_soc.volts_to_soc(
