@@ -179,6 +179,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         # Full start choreography (engine.start command). Composes the
         # cranking primitive above with choke + spark management.
         "start": {
+            # Choke servo retired 2026-09-17; cold starts use the supervisor's
+            # repeated crank attempts. True re-enables the choke steps below.
+            "chokeEnabled":          False,
             # Servo preset used during cranking (choke closed for cold start).
             "chokePreset":           "start_cold",
             # Preset applied after engine catches (choke open).
