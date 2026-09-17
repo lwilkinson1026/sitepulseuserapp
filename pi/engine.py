@@ -323,6 +323,16 @@ def _publish_state(
     except Exception as e:
         print(f"[engine] aux-follow reconcile skipped: {e}", flush=True)
 
+    # Same idea for the PWM cooling fan: the relay above decides whether it
+    # has power, this decides how hard it works. Best-effort for the same
+    # reason — a fan hiccup must never block an engine state change. If it
+    # fails, the fan's control lead floats and it runs flat out.
+    try:
+        from fan import reconcile as _fan_reconcile
+        _fan_reconcile(db, unit_id, state)
+    except Exception as e:
+        print(f"[engine] fan reconcile skipped: {e}", flush=True)
+
 
 def init_engine(db: firestore.Client, unit_id: str) -> None:
     """Publish 'idle' on listener startup so the app sees a clean state.
