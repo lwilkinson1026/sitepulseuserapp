@@ -227,6 +227,9 @@ def _start_background_services(db: firestore.Client) -> None:
         ("relays.start_override_watcher", lambda: __import__(
             "relays", fromlist=["start_override_watcher"]
         ).start_override_watcher(db, UNIT_ID)),
+        ("enclosure_fan.start_enclosure_fan", lambda: __import__(
+            "enclosure_fan", fromlist=["start_enclosure_fan"]
+        ).start_enclosure_fan(db, UNIT_ID)),
         ("scheduler.start_scheduler", lambda: __import__(
             "scheduler", fromlist=["start_scheduler"]
         ).start_scheduler(db, UNIT_ID)),

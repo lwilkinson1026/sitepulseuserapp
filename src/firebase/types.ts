@@ -220,6 +220,27 @@ export interface LightConfig {
   autoOnlyAfterDark: boolean;      // gate auto-on by sun-down time
 }
 
+// units/{unitId}/config/enclosureFan — thermostat for the electronics-enclosure
+// fan (pi/enclosure_fan.py). Absent / no relayChannel → the unit has no
+// relay-switched enclosure fan. If relayChannel is the light's channel, the
+// unit has no security light (UNIT-001). Mode changes go through relay.set.
+export interface EnclosureFanConfig {
+  relayChannel?: 1 | 2 | 3;
+  mode?: 'off' | 'on' | 'auto';    // auto = thermostat; off still yields to criticalTempC
+  onTempC?: number;                // default 60
+  offTempC?: number;               // default 50
+  criticalTempC?: number;          // default 75
+}
+
+// units/{unitId}/current/enclosureFan — written by the Pi on change only.
+export interface EnclosureFanState {
+  state: boolean;
+  reason:
+    | 'hot' | 'cool' | 'engine_running' | 'critical_temp'
+    | 'temp_unavailable' | 'manual_on' | 'manual_off';
+  tempC: number | null;            // Pi SoC temperature at the last change
+}
+
 // units/{unitId}/config/notifications — notification recipients. The events
 // Cloud Function reads telegramChatIds and messages each on notifiable events
 // (engine.start/stop, etc.). The bot token is a Function secret, not stored here.
