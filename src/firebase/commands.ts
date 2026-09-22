@@ -120,6 +120,16 @@ export function toggleAc(unitId: string, uid: string, pressDurationSec?: number)
   return issueCommand(unitId, uid, 'ac.toggle', payload);
 }
 
+// ── cooling fan speed ───────────────────────────────────────────────────
+// The 4-wire PWM fan's speed (pi/fan.py). 'auto' follows engine state using
+// config/fan.speeds; 'manual' pins it to speedPct (0-100). This never
+// switches the fan's power — the fan relay still owns that.
+export function setFan(unitId: string, uid: string, mode: 'auto' | 'manual', speedPct?: number) {
+  const payload: Record<string, unknown> = { mode };
+  if (mode === 'manual' && speedPct !== undefined) payload.speedPct = speedPct;
+  return issueCommand(unitId, uid, 'fan.set', payload);
+}
+
 // ── engine starter cranking (phase G.2) ─────────────────────────────────
 // Single crank attempt via the VESC motor controller. Pi-side `engine.py`
 // runs a safety loop that refreshes SET_CURRENT at 10 Hz, watches motor

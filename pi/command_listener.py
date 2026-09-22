@@ -103,6 +103,8 @@ HANDLERS: Dict[str, Handler] = {
     # (were PCA9685 servo arms); same command names, same payloads.
     "lcd.wake":          _lazy("buttons", "handle_lcd_wake",          "lcd.wake"),
     "ac.toggle":         _lazy("buttons", "handle_ac_toggle",         "ac.toggle"),
+    # PWM cooling fan speed (the fan relay still owns its power)
+    "fan.set":           _lazy("fan",     "handle_fan_set",           "fan.set"),
     # Phase G.2 — VESC starter cranking (low-level, no choke/spark management)
     "engine.crank":      _lazy("engine",  "handle_engine_crank",      "engine.crank"),
     # Phase G.3 — full engine start choreography: choke → spark → crank → settle
@@ -248,6 +250,9 @@ def _start_background_services(db: firestore.Client) -> None:
         ("buttons.start_lcd_wake_loop", lambda: __import__(
             "buttons", fromlist=["start_lcd_wake_loop"]
         ).start_lcd_wake_loop(db, UNIT_ID)),
+        ("fan.start_fan", lambda: __import__(
+            "fan", fromlist=["start_fan"]
+        ).start_fan(db, UNIT_ID)),
         ("engine.init_engine", lambda: __import__(
             "engine", fromlist=["init_engine"]
         ).init_engine(db, UNIT_ID)),
@@ -305,6 +310,12 @@ def main() -> None:
             _log(f"shutdown: servos.detach_all failed: {e}")
         # Release the button-presser GPIOs so nothing is left held "pressed"
         # and the bench tool can claim them.
+        # Let go of the fan's control lead; it falls back to full speed.
+        try:
+            from fan import release as _fan_release
+            _fan_release()
+        except Exception as e:
+            _log(f"shutdown: fan.release failed: {e}")
         try:
             from buttons import release_all as _buttons_release
             _buttons_release()

@@ -170,6 +170,7 @@ export type CommandKind =
   | 'lcd.wake'
   // Predator AC outlet toggle-button presser (phase E.3)
   | 'ac.toggle'
+  | 'fan.set'
   // VESC starter cranking (phase G.2)
   | 'engine.crank'
   // Full engine start choreography (phase G.3): choke → spark → crank → settle
