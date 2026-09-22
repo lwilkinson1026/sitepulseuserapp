@@ -13,6 +13,8 @@ import { useOptimistic } from '../../hooks/useOptimistic';
 import { useAuth } from '../../hooks/AuthContext';
 import { setLight, setRelay } from '../../firebase/commands';
 import type {
+  EnclosureFanConfig,
+  EnclosureFanState,
   EngineConfig,
   LightConfig,
   LightState,
@@ -37,6 +39,16 @@ const LIGHT_MODES: LightMode[] = ['off', 'on', 'auto'];
 const RELAY_MODES: LightMode[] = ['off', 'on', 'auto'];
 const RELAY_MODES_NO_AUTO: LightMode[] = ['off', 'on'];
 
+const ENCLOSURE_REASON_LABEL: Record<EnclosureFanState['reason'], string> = {
+  hot: 'PI HOT',
+  cool: 'PI COOL',
+  engine_running: 'ENGINE RUNNING',
+  critical_temp: 'OVER-TEMP OVERRIDE',
+  temp_unavailable: 'NO TEMP READING',
+  manual_on: 'MANUAL',
+  manual_off: 'MANUAL',
+};
+
 export function OutletsScreen() {
   const { unitId } = useActiveUnit();
   const { user } = useAuth();
@@ -46,6 +58,8 @@ export function OutletsScreen() {
   const lightState = useUnitDoc<LightState>(unitId, 'current', 'light');
   const relaysState = useUnitDoc<RelaysState>(unitId, 'current', 'relays');
   const engineConfig = useUnitDoc<EngineConfig>(unitId, 'config', 'engine');
+  const enclosureFanConfig = useUnitDoc<EnclosureFanConfig>(unitId, 'config', 'enclosureFan');
+  const enclosureFanState = useUnitDoc<EnclosureFanState>(unitId, 'current', 'enclosureFan');
 
   // Derived values come before any conditional return so hook order stays
   // stable across renders (React's rules-of-hooks).
@@ -54,12 +68,16 @@ export function OutletsScreen() {
   // The fan channel is hardwired to engine-follow on the Pi and not
   // user-controllable, so it's hidden from this screen entirely.
   const fanChannel = (engineConfig.data?.fanRelayChannel ?? 3) as 1 | 2 | 3;
+  // A unit can hand a channel to the enclosure-fan thermostat. If that's the
+  // light's channel the unit has no light at all (the Pi refuses light.set).
+  const enclosureChannel = enclosureFanConfig.data?.relayChannel ?? null;
+  const hasLight = enclosureChannel !== lightChannel;
   const auxChannels = useMemo(
     () =>
       ([1, 2, 3] as Array<1 | 2 | 3>).filter(
-        (c) => c !== lightChannel && c !== fanChannel,
+        (c) => c !== lightChannel && c !== fanChannel && c !== enclosureChannel,
       ),
-    [lightChannel, fanChannel],
+    [lightChannel, fanChannel, enclosureChannel],
   );
   // Spark channel is driven by the engine sequence, so engine-follow 'auto'
   // would be meaningless there — offer it only on the other aux channel(s).
@@ -69,9 +87,15 @@ export function OutletsScreen() {
   // One optimistic value per relay channel. We pre-allocate all three hooks
   // unconditionally (rules-of-hooks: never call hooks in a loop or branch),
   // even though only two are typically aux and one is the light.
-  const truth1 = (relaysConfig.data?.channels?.['1']?.mode ?? 'off') as LightMode;
-  const truth2 = (relaysConfig.data?.channels?.['2']?.mode ?? 'off') as LightMode;
-  const truth3 = (relaysConfig.data?.channels?.['3']?.mode ?? 'off') as LightMode;
+  // The enclosure-fan channel's truth is config/enclosureFan.mode, which the
+  // Pi defaults to 'auto' (thermostat) when nothing has been set yet.
+  const truthFor = (key: '1' | '2' | '3'): LightMode =>
+    String(enclosureChannel) === key
+      ? enclosureFanConfig.data?.mode ?? 'auto'
+      : relaysConfig.data?.channels?.[key]?.mode ?? 'off';
+  const truth1 = truthFor('1');
+  const truth2 = truthFor('2');
+  const truth3 = truthFor('3');
   const [mode1, setMode1] = useOptimistic<LightMode>(truth1);
   const [mode2, setMode2] = useOptimistic<LightMode>(truth2);
   const [mode3, setMode3] = useOptimistic<LightMode>(truth3);
@@ -121,11 +145,19 @@ export function OutletsScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Eyebrow parts={['02 / Outputs', `${auxChannels.length + 1} channels`]} />
-          <Text style={styles.headline}>Security{'\n'}light</Text>
+          <Eyebrow
+            parts={[
+              '02 / Outputs',
+              `${auxChannels.length + (hasLight ? 1 : 0) + (enclosureChannel ? 1 : 0)} channels`,
+            ]}
+          />
+          <Text style={styles.headline}>
+            {hasLight ? `Security\nlight` : `Outputs`}
+          </Text>
         </View>
 
         {/* ── Light card ─────────────────────────────────────────────── */}
+        {hasLight ? (
         <View style={styles.card}>
           <View style={styles.cardHeaderRow}>
             <View style={{ flex: 1 }}>
@@ -185,6 +217,66 @@ export function OutletsScreen() {
             </View>
           ) : null}
         </View>
+        ) : null}
+
+        {/* ── Enclosure fan (thermostat-driven) ──────────────────────── */}
+        {enclosureChannel ? (() => {
+          const key = String(enclosureChannel) as '1' | '2' | '3';
+          const mode = channelModes[key];
+          const fanOn = enclosureFanState.data?.state
+            ?? relaysState.data?.channels?.[key]?.state
+            ?? false;
+          const reason = enclosureFanState.data?.reason;
+          const tempC = enclosureFanState.data?.tempC;
+          return (
+            <View style={styles.card}>
+              <View style={styles.cardHeaderRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cardLabel}>Enclosure fan</Text>
+                  <Text style={styles.cardSubLabel}>
+                    CH {key.padStart(2, '0')}  ·  {fanOn ? 'RUNNING' : 'OFF'}
+                    {reason ? `  ·  ${ENCLOSURE_REASON_LABEL[reason] ?? reason}` : ''}
+                  </Text>
+                </View>
+                <View style={[styles.indicator, fanOn ? styles.indicatorOn : null]} />
+              </View>
+              <View style={styles.segmentGroup}>
+                {RELAY_MODES.map((m) => {
+                  const active = mode === m;
+                  return (
+                    <Pressable
+                      key={m}
+                      onPress={() => onRelayMode(enclosureChannel, m)}
+                      style={[styles.segment, active ? styles.segmentActive : null]}
+                    >
+                      <Text
+                        style={[
+                          styles.segmentLabel,
+                          active ? styles.segmentLabelActive : null,
+                        ]}
+                      >
+                        {m.toUpperCase()}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {mode === 'auto' ? (
+                <View style={styles.autoDetail}>
+                  <Text style={styles.autoDetailRow}>
+                    ON AT {enclosureFanConfig.data?.onTempC ?? 60} °C  ·  OFF AT{' '}
+                    {enclosureFanConfig.data?.offTempC ?? 50} °C
+                  </Text>
+                  {tempC != null ? (
+                    <Text style={styles.autoDetailRow}>
+                      PI WAS {tempC} °C AT LAST CHANGE
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+          );
+        })() : null}
 
         {/* ── Aux outputs ────────────────────────────────────────────── */}
         {auxChannels.length > 0 ? (

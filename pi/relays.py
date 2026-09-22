@@ -23,6 +23,13 @@ cooling fans, and an engine.stop that reported success while the engine ran.
 Channel 1 is the security light by convention (overridable via
 `config/light.relayChannel` in Firestore).
 
+A unit can give a channel to the electronics-enclosure fan instead, by setting
+`config/enclosureFan.relayChannel`. That channel is then driven ONLY by the
+thermostat in enclosure_fan.py. If it is the light channel (UNIT-001: all
+three relays are spoken for, so the fan took ch1), the unit has no security
+light: light.set is refused and the sentry pulse / override switch leave the
+relay alone, so nothing light-shaped can ever switch the fan.
+
 Exposed handlers (imported lazily by command_listener.py):
     handle_light_set(db, unit_id, payload)
     handle_relay_set(db, unit_id, payload)
@@ -156,22 +163,42 @@ def _read_override() -> bool:
 
 # ─── Firestore mirroring ────────────────────────────────────────────────────
 
-def _light_channel(db: firestore.Client, unit_id: str) -> int:
-    """Read which channel currently backs the security light. Defaults to 1."""
+def _enclosure_fan_channel(db: firestore.Client, unit_id: str) -> Optional[int]:
+    """The channel given over to the electronics-enclosure fan, or None if this
+    unit has no relay-switched enclosure fan (the default). Read from
+    config/enclosureFan.relayChannel."""
     try:
-        snap = db.document(f"units/{unit_id}/config/light").get()
+        snap = db.document(f"units/{unit_id}/config/enclosureFan").get()
         if snap.exists:
-            ch = snap.get("relayChannel")
+            ch = (snap.to_dict() or {}).get("relayChannel")
             if ch in (1, 2, 3):
                 return int(ch)
     except Exception:
         pass
-    return 1
+    return None
+
+
+def _light_channel(db: firestore.Client, unit_id: str) -> Optional[int]:
+    """Read which channel currently backs the security light. Defaults to 1.
+    None when the enclosure fan has taken that channel — the unit then has no
+    light, and every light path must leave the relay alone."""
+    ch = 1
+    try:
+        snap = db.document(f"units/{unit_id}/config/light").get()
+        if snap.exists:
+            cfg_ch = (snap.to_dict() or {}).get("relayChannel")
+            if cfg_ch in (1, 2, 3):
+                ch = int(cfg_ch)
+    except Exception:
+        pass
+    if ch == _enclosure_fan_channel(db, unit_id):
+        return None
+    return ch
 
 
 def _mirror_light(db: firestore.Client, unit_id: str, source: str) -> None:
     ch = _light_channel(db, unit_id)
-    state_on = _override_active or _relay_logical[ch]
+    state_on = ch is not None and (_override_active or _relay_logical[ch])
     db.document(f"units/{unit_id}/current/light").set({
         "state": state_on,
         "physicalOverride": _override_active,
@@ -245,6 +272,7 @@ def reconcile_engine_follow(
     )
     light_ch = _light_channel(db, unit_id)
     fan_ch = _fan_channel(db, unit_id)
+    enclosure_ch = _enclosure_fan_channel(db, unit_id)
     try:
         snap = db.document(f"units/{unit_id}/config/relays").get()
         channels = (snap.to_dict() or {}).get("channels", {}) if snap.exists else {}
@@ -254,7 +282,9 @@ def reconcile_engine_follow(
     changed = False
     with _state_lock:
         for ch in RELAY_PINS:
-            if ch == light_ch:
+            if ch == light_ch or ch == enclosure_ch:
+                # The enclosure fan's 'auto' means thermostat, not
+                # engine-follow — enclosure_fan.py owns that channel.
                 continue
             follows = ch == fan_ch or channels.get(str(ch), {}).get("mode") == "auto"
             if follows and _relay_logical[ch] != running:
@@ -262,6 +292,28 @@ def reconcile_engine_follow(
                 changed = True
         if changed:
             _mirror_relays(db, unit_id, "engine")
+    if enclosure_ch is not None:
+        # The thermostat also runs the fan while the engine does; tell it now
+        # rather than letting it notice on its next config refresh.
+        from enclosure_fan import poke
+        poke()
+
+
+# ─── enclosure fan (driven by enclosure_fan.py's thermostat) ───────────────
+
+def drive_enclosure_fan(db: firestore.Client, unit_id: str, on: bool) -> bool:
+    """Set the enclosure-fan relay. Returns True if the state changed. No-op
+    (False) when the unit has no enclosure-fan channel configured."""
+    ch = _enclosure_fan_channel(db, unit_id)
+    if ch is None:
+        return False
+    _ensure_initialized()
+    with _state_lock:
+        if _relay_logical[ch] == on:
+            return False
+        _drive(ch, on)
+        _mirror_relays(db, unit_id, "enclosure_fan")
+    return True
 
 
 # ─── command handlers ──────────────────────────────────────────────────────
@@ -273,6 +325,9 @@ def handle_light_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]
     """
     _ensure_initialized()
     ch = _light_channel(db, unit_id)
+    if ch is None:
+        raise ValueError("light.set: this unit has no security light "
+                         "(its channel drives the enclosure fan)")
 
     if "configPatch" in payload:
         # Pure config update — don't touch the relay.
@@ -322,6 +377,20 @@ def handle_relay_set(db: firestore.Client, unit_id: str, payload: Dict[str, Any]
         raise ValueError(f"relay.set: invalid channel {channel!r}")
     if mode not in ("off", "on", "auto"):
         raise ValueError(f"relay.set: invalid mode {mode!r}")
+
+    if channel == _enclosure_fan_channel(db, unit_id):
+        # Thermostat-owned. Record the mode and let enclosure_fan.py apply it
+        # — it still forces the fan on at the critical temperature even in
+        # 'off', which a direct _drive here would bypass.
+        db.document(f"units/{unit_id}/config/enclosureFan").set(
+            {"mode": mode}, merge=True,
+        )
+        db.document(f"units/{unit_id}/config/relays").set(
+            {"channels": {str(channel): {"mode": mode}}}, merge=True,
+        )
+        from enclosure_fan import poke
+        poke()
+        return
 
     light_ch = _light_channel(db, unit_id)
     # The fan channel is hardwired to engine-follow and not user-controllable.
@@ -390,7 +459,11 @@ def start_override_watcher(db: firestore.Client, unit_id: str) -> threading.Thre
                     light_ch = _light_channel(db, unit_id)
                     with _state_lock:
                         _override_active = current
-                        if current:
+                        if light_ch is None:
+                            # No light on this unit — mirror the switch
+                            # position but never touch a relay for it.
+                            pass
+                        elif current:
                             # Force the light on hardware-side. Keep the
                             # logical state so we can restore on release.
                             _drive(light_ch, True)
@@ -446,6 +519,8 @@ def pulse_light(db: firestore.Client, unit_id: str, duration_s: int) -> None:
 
     def run() -> None:
         ch = _light_channel(db, unit_id)
+        if ch is None:
+            return  # no light on this unit
         with _state_lock:
             if _override_active:
                 return  # hardware switch already controlling
