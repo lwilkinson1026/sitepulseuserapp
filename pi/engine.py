@@ -167,6 +167,12 @@ DEFAULT_CHARGE_CONFIG: Dict[str, Any] = {
     # sits near BMS-cutoff territory: 42.0 V = 3.00 V/cell on 14S LiFePO4,
     # ~7 V above the ~35 V BMS cut, comfortably below heavy-load sag.
     "voltageMinAbort":  42.0,
+    # The pack must stay at/below voltageMinAbort this long before we abort.
+    # A big AC load switching on dips the VESC's bus voltage for a moment
+    # (UNIT-001, 2026-09-22: a ~745 W load pulled a 50.2 V pack to 44.9 V for
+    # one STATUS_5 frame and killed an 89 % SoC charge). A genuinely low pack
+    # stays low, so a short hold loses nothing.
+    "lowVoltageHoldSec": 3.0,
     # Safety ceiling — even with no other exit, charge dies after this much
     # wall-clock time, then the engine auto-stops (see _run_charge_loop's
     # autostop_on_timeout). Defaults to the 2-hour hard max. Code clamps to
@@ -750,6 +756,7 @@ def _resolve_charge_params(
         "current_amps":      max(0.0, min(MAX_CHARGE_AMPS_HARD, current_amps)),
         "voltage_stop":      voltage_stop,
         "voltage_min_abort": float(cfg.get("voltageMinAbort", 42.0)),
+        "low_voltage_hold_sec": max(0.0, float(cfg.get("lowVoltageHoldSec", 3.0))),
         "max_duration_sec":  max(1.0, min(MAX_CHARGE_DURATION_HARD, max_dur)),
         "refresh_hz":        max(MIN_REFRESH_HZ, min(MAX_REFRESH_HZ, int(cfg.get("refreshHz", 10)))),
         "min_rpm_for_load":  int(cfg.get("minRpmForLoad", 800)),
@@ -768,7 +775,8 @@ def _run_charge_loop(
     refresh_hz, slewing applied_amps toward the live shared target each
     send tick. Reads STATUS frames inline, exits on any of:
       - voltage rises above voltage_stop  → state="idle" (success)
-      - voltage falls below voltage_min_abort → state="failed_low_voltage"
+      - voltage stays at/below voltage_min_abort for low_voltage_hold_sec
+                                            → state="failed_low_voltage"
       - RPM falls below min_rpm_for_load   → state="failed_engine_bogged"
       - FET or motor temp exceeds limit    → state="failed_overtemp"
       - max_duration_sec exceeded          → state="failed_timeout"
@@ -778,6 +786,7 @@ def _run_charge_loop(
 
     voltage_stop    = params["voltage_stop"]
     voltage_min     = params["voltage_min_abort"]
+    low_volt_hold   = params["low_voltage_hold_sec"]
     max_dur         = params["max_duration_sec"]
     refresh_hz      = params["refresh_hz"]
     min_rpm         = params["min_rpm_for_load"]
@@ -826,6 +835,8 @@ def _run_charge_loop(
         last_fet_temp     = None
         last_motor_temp   = None
         peak_volts        = 0.0
+        low_volts_since   = None   # monotonic time the current sag began
+        low_volts_min     = None   # lowest reading seen during that sag
 
         result_state    = None
         result_metadata: Dict[str, Any] = {}
@@ -905,13 +916,35 @@ def _run_charge_loop(
                     "phase":        "charge_complete",
                 }
                 break
+            # Debounced: a load step can dip the bus for a frame or two, so
+            # only abort once the sag has held for low_volt_hold seconds.
             if last_volts is not None and last_volts <= voltage_min:
-                result_state    = "failed_low_voltage"
-                result_metadata = {
-                    "finalVoltage": round(last_volts, 2),
-                    "durationSec":  round(elapsed, 1),
-                }
-                break
+                if low_volts_since is None:
+                    low_volts_since = now
+                    low_volts_min   = last_volts
+                    print(
+                        f"[engine] charge: pack {last_volts} V <= {voltage_min} V, "
+                        f"holding {low_volt_hold}s before abort",
+                        flush=True,
+                    )
+                low_volts_min = min(low_volts_min, last_volts)
+                if now - low_volts_since >= low_volt_hold:
+                    result_state    = "failed_low_voltage"
+                    result_metadata = {
+                        "finalVoltage": round(last_volts, 2),
+                        "minVoltage":   round(low_volts_min, 2),
+                        "lowForSec":    round(now - low_volts_since, 1),
+                        "durationSec":  round(elapsed, 1),
+                    }
+                    break
+            elif last_volts is not None and low_volts_since is not None:
+                print(
+                    f"[engine] charge: voltage dip recovered to {last_volts} V after "
+                    f"{round(now - low_volts_since, 1)}s (min {low_volts_min} V)",
+                    flush=True,
+                )
+                low_volts_since = None
+                low_volts_min   = None
             if last_rpm is not None and last_rpm < min_rpm:
                 result_state    = "failed_engine_bogged"
                 result_metadata = {

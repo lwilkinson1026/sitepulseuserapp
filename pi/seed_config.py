@@ -222,6 +222,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # LiFePO4 BMS cuts ~2.5 V/cell = ~35 V on 14S; 3.00 V/cell
             # keeps ~7 V of headroom while clearing load sag.
             "voltageMinAbort":  _pack_v(3.000),
+            # Seconds the pack must stay at/below voltageMinAbort before the
+            # charge aborts — rides through dips when a big AC load kicks on.
+            "lowVoltageHoldSec": 3.0,
             # Hard ceiling on charge duration; engine auto-stops on timeout.
             # Code clamps to 2 hours; default to that full 2-hour window.
             "maxDurationSec":   7200,    # 2 hours

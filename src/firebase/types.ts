@@ -346,6 +346,7 @@ export interface EngineChargeConfig {
   currentAmps: number;             // regen draw target (amps into pack)
   voltageStop: number;             // pack volts; exit charge loop above this
   voltageMinAbort: number;         // pack volts; engine not generating, abort
+  lowVoltageHoldSec?: number;      // sag must last this long before abort (Pi default 3 s)
   maxDurationSec: number;
   refreshHz: number;
   minRpmForLoad: number;
