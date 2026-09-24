@@ -564,3 +564,53 @@ export interface PushTokenDoc {
   createdAt: Timestamp;
   lastSeenAt: Timestamp;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Rental billing — units/{unitId}/billing/*. Read-only to the client; see
+// functions/src/billing.ts for who writes what.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Written by scripts/billing-setup.mjs. Its existence is what makes a unit a
+// rental — owned units without a plan never show billing UI.
+export interface BillingPlanDoc {
+  priceId: string;
+  portalConfigurationId?: string;
+  label: string;                   // e.g. "SitePulse V1 rental"
+  amountCents: number;
+  currency: string;                // ISO lowercase, e.g. "usd"
+  interval: 'month' | 'year';
+  firstChargeAt?: Timestamp;       // first rent due date (end of trial + 1 day)
+  paymentMethodTypes?: string[];
+}
+
+export type BillingStatus =
+  | 'active'
+  | 'trialing'
+  | 'past_due'
+  | 'unpaid'
+  | 'canceled'
+  | 'incomplete'
+  | 'incomplete_expired'
+  | 'paused';
+
+// Mirrored from Stripe by the webhook. `status` is absent until Checkout
+// completes (the doc may hold only customerId before that).
+export interface BillingSubscriptionDoc {
+  customerId: string;
+  subscriptionId?: string;
+  status?: BillingStatus;
+  currentPeriodEnd?: Timestamp | null;   // next charge date
+  cancelAt?: Timestamp | null;
+  cancelAtPeriodEnd?: boolean;
+  paymentMethod?: { type: string; brand: string | null; last4: string | null } | null;
+  latestInvoice?: {
+    id: string;
+    status: string | null;
+    amountDue: number;
+    amountPaid: number;
+    currency: string;
+    hostedInvoiceUrl: string | null;
+    created: Timestamp;
+  } | null;
+  updatedAt?: Timestamp;
+}

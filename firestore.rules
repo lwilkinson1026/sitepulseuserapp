@@ -121,6 +121,15 @@ service cloud.firestore {
         allow read, write: if isOwnerOf(unitId);
       }
 
+      // Rental billing (plan + Stripe subscription snapshot). Owner reads to
+      // render billing status; only Cloud Functions write — the plan via the
+      // admin setup script, the subscription via the Stripe webhook. A client
+      // write here could fake "active", so it is never allowed.
+      match /billing/{doc} {
+        allow read: if isOwnerOf(unitId);
+        allow write: if false;
+      }
+
       // Roles (phase 2 — multi-user per unit). Owner manages members.
       match /members/{memberUid} {
         allow read: if isOwnerOf(unitId);
