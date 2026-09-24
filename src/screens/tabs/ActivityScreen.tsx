@@ -6,7 +6,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { Eyebrow, FigCaption, FuelPanel, Screen, SecondaryCTA } from '../../components';
+import { BillingPanel, Eyebrow, FigCaption, FuelPanel, Screen, SecondaryCTA } from '../../components';
 import { useAuth } from '../../hooks/AuthContext';
 import { useUnitEvents, type EventEntry } from '../../hooks/useUnitEvents';
 import type { EventKind } from '../../firebase/types';
@@ -116,6 +116,8 @@ export function ActivityScreen() {
             parts={['05 / Activity', `${events.events.length} events`]}
           />
         </View>
+
+        <BillingPanel unitId={unitId} />
 
         <View style={styles.fuel}>
           <FuelPanel unitId={unitId} />
