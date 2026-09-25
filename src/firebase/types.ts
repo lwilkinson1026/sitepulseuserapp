@@ -502,7 +502,9 @@ export type EventKind =
   | 'fuel.low'
   | 'fuel.empty'
   // AI fleet bot took a significant action (functions/src/fleetMcp.ts)
-  | 'bot.command';
+  | 'bot.command'
+  // Cloud monitor: battery crossed below 10 % (functions/src/grokAlerts.ts)
+  | 'battery.low';
 
 export interface EventDoc {
   kind: EventKind;

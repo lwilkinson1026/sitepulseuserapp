@@ -78,3 +78,32 @@ firebase deploy --only functions:fleetMcp
 ```
 
 Then update the bot's config with the new token.
+
+## Grok alerts (`functions/src/grokAlerts.ts`)
+
+The cloud watches every unit and **wakes Grok directly** through the xAI API,
+with this MCP server attached, when one of these fires:
+
+| Alert | Fires when | Re-arms when |
+|---|---|---|
+| `battery_low` | Display SoC ≤ 10 % for 2 min. With the display asleep: pack ≤ 3.10 V/cell (46.5 V on 15S) at rest, not charging. | SoC ≥ 15 % or ≥ 3.20 V/cell |
+| `pi_hot` | Pi SoC temp ≥ its warn threshold (75 °C) for 2 min, or it is throttling right now | 5 °C below the threshold |
+| `engine_bogged` | 2nd `failed_engine_bogged` within 6 h | after firing, the count restarts |
+| `offline` | No telemetry for 30 min (checked every 5 min) | Telemetry resumes, which also sends a "back online" Telegram |
+
+Each alert fires **once per incident**. State is kept in `units/{id}/alerts/state`.
+`battery_low` and `offline` also write a unit event (`battery.low`,
+`system.offline`), so the owner's push, the unit Telegram and the Activity log
+show them. Grok's report goes **only** to `fleet/bot.escalationTelegramChatIds`,
+never to the unit's own chats, which a customer may share. Every wake-up is
+logged in `fleetBotWakes` with the report, outcome and duration. Grok gets its
+last 3 reports for that unit as context.
+
+Settings in `fleet/bot`: `alertsEnabled`, `escalationTelegramChatIds`, `grokModel`
+(default `grok-4.7`), `maxWakesPerDay` (default 24; past the cap you get a
+Telegram saying so instead), `lowSocPct` / `clearSocPct` (10 / 15), and
+`offlineAfterMin` (30). Secrets: `XAI_API_KEY`, `FLEET_MCP_TOKEN`,
+`TELEGRAM_BOT_TOKEN`.
+
+The system prompt Grok gets is in `functions/src/grokPrompt.ts`. It mirrors
+section 9 of the handoff doc, so change both together.

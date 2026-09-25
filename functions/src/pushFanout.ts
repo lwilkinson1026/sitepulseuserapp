@@ -82,6 +82,19 @@ const COPY: Record<string, { title: string; body: (payload: Record<string, unkno
         : `Pi at ${t}${limit}. Rising; check airflow before it throttles.`;
     },
   },
+  // Written by grokAlerts.ts when a unit crosses below 10 %.
+  'battery.low': {
+    title: 'Battery below 10%',
+    body: (p) =>
+      typeof p.batterySocPct === 'number'
+        ? `Battery at ${p.batterySocPct}%. The fleet operator has been alerted.`
+        : `Pack at ${p.packVolts ?? '??'} V (about 10%). The fleet operator has been alerted.`,
+  },
+  // Written by grokAlerts.ts after 30 min without telemetry.
+  'system.offline': {
+    title: 'Unit offline',
+    body: (p) => `No data from the unit for ${p.silentForMin ?? 'over 30'} minutes. Check power and internet.`,
+  },
   // Written by the fleet MCP server (fleetMcp.ts) whenever the AI bot takes
   // a significant action, so the owner always hears about it.
   'bot.command': {
