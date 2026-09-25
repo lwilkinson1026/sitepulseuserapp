@@ -114,6 +114,33 @@ async function telemetry(unitId: string) {
   return { snapshot: s, engine: engine.data() ?? null, ageSec };
 }
 
+/**
+ * Whether the unit's on-board supervisor is auto-recharging, resolved the same
+ * way the Pi resolves it (pi/engine_supervisor.py _load_config): if
+ * config/charge exists, its `enabled` (the app's Auto Recharge toggle) decides,
+ * overriding config/engine.supervisor.enabled in both directions; the latter is
+ * only a fallback when config/charge is missing. Reading the raw fields is a
+ * trap — UNIT-002 has supervisor.enabled=false but charge.enabled=true (on).
+ */
+async function autoRecharge(unitId: string, engine: admin.firestore.DocumentData | null) {
+  const [charge, engCfg] = await Promise.all([
+    db.doc(`units/${unitId}/config/charge`).get(),
+    db.doc(`units/${unitId}/config/engine`).get(),
+  ]);
+  const enabled = charge.exists
+    ? charge.get('enabled') === true
+    : engCfg.get('supervisor.enabled') === true;
+  const lastEval = engine?.lastEvalAt as admin.firestore.Timestamp | undefined;
+  return {
+    enabled,
+    source: charge.exists ? 'config/charge.enabled (app Auto Recharge toggle)' : 'config/engine.supervisor.enabled (fallback)',
+    // A supervisor that is enabled but hasn't evaluated recently may be dead.
+    lastEvalAgeSec: lastEval ? Math.round((Date.now() - lastEval.toMillis()) / 1000) : null,
+    desired: engine?.desired ?? null,
+    reason: engine?.reason ?? null,
+  };
+}
+
 async function requireReadable(policy: BotPolicy, unitId: string) {
   if (!(await unitExists(unitId))) throw new ToolRefusal(`Unknown unit ${unitId}. Use list_units.`);
   if (accessFor(policy, unitId) === 'off') throw new ToolRefusal(`Bot access to ${unitId} is off.`);
@@ -298,6 +325,7 @@ function buildServer(): McpServer {
         outputWatts: s?.output_watts ?? null,
         acOn: s?.ac_active ?? null,
         engineState: engine?.state ?? 'unknown',
+        autoRechargeEnabled: (await autoRecharge(u.id, engine)).enabled,
       };
     }));
     return ok({ botControlEnabled: policy.enabled, units: rows.filter(Boolean) });
@@ -312,7 +340,9 @@ function buildServer(): McpServer {
     await requireReadable(policy, unitId);
     const t = await telemetry(unitId);
     return ok({ unitId, access: accessFor(policy, unitId), telemetryAgeSec: t.ageSec,
-      online: t.ageSec !== null && t.ageSec <= policy.staleAfterSec, snapshot: t.snapshot, engine: t.engine });
+      online: t.ageSec !== null && t.ageSec <= policy.staleAfterSec,
+      autoRecharge: await autoRecharge(unitId, t.engine),
+      snapshot: t.snapshot, engine: t.engine });
   }));
 
   server.registerTool('get_events', {
@@ -340,7 +370,8 @@ function buildServer(): McpServer {
     inputSchema: {
       unitId,
       name: z.enum(['charge', 'engine', 'sentry', 'fan', 'relays', 'camera']).describe(
-        'charge = recharge schedule/windows/quiet hours; engine = supervisor voltage thresholds and crank/charge settings.'),
+        'charge = recharge schedule/windows/quiet hours; engine = supervisor thresholds and crank/charge settings. ' +
+        'Do NOT read engine.supervisor.enabled to decide if auto-recharge is on — use autoRecharge from get_unit_status.'),
     },
     annotations: READ,
   }, guarded('get_config', async ({ unitId, name }, policy) => {
