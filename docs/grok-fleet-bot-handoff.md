@@ -105,9 +105,9 @@ Engine commands also return `engineStateNow`.
 | Tool | Use it for |
 |---|---|
 | `list_units` | Fleet overview: online, telemetry age, SoC, pack volts, output, AC, engine state, the bot's access. **Start every cycle here.** |
-| `get_unit_status(unitId)` | Full snapshot plus the engine state doc. **Call before and after any control action.** |
+| `get_unit_status(unitId)` | Full snapshot, the engine state doc, and `autoRecharge` (is the unit's own supervisor charging it, and is it alive). **Call before and after any control action.** |
 | `get_events(unitId, limit?, kinds?)` | Recent history: engine starts and stops, low SoC, overheat, motion, fuel, bot actions |
-| `get_config(unitId, name)` | `charge` (schedule), `engine` (thresholds, supervisor on/off), `sentry`, `fan`, `relays`, `camera` |
+| `get_config(unitId, name)` | `charge` (schedule), `engine` (thresholds), `sentry`, `fan`, `relays`, `camera` |
 | `get_command_result(unitId, commandId)` | Follow up on a `pending` command |
 
 ### Control
@@ -208,12 +208,16 @@ Work through the rules in order for each online unit with `access = full`.
    - Inside quiet hours: wait, unless the runway is short. If
      `time_to_empty_minutes` < 120, or the load is high and SoC is falling fast,
      treat it as critical.
-4. **Is the unit already managing itself?** Check
-   `get_config(unitId, "engine").supervisor.enabled`. If it's `true`, the unit's
-   own supervisor starts and stops the engine on these same thresholds, so
-   **don't duplicate it.** Only step in if it clearly failed, for example SoC
-   still falling 15+ minutes after it should have started. **UNIT-002 currently
-   has its supervisor disabled, so the bot is its autonomous charger.**
+4. **Is the unit already managing itself?** Check `autoRecharge.enabled` from
+   `get_unit_status` (or `autoRechargeEnabled` in `list_units`). If it's `true`,
+   the unit's own supervisor starts and stops the engine on these same
+   thresholds, so **don't duplicate it.** Only step in if it clearly failed,
+   for example SoC still falling 15+ minutes after it should have started, or
+   `autoRecharge.lastEvalAgeSec` over 300 (the supervisor has stopped running).
+   **Don't read `config/engine.supervisor.enabled` for this.** The app's Auto
+   Recharge toggle (`config/charge.enabled`) overrides it in both directions
+   whenever it exists. UNIT-002 has `supervisor.enabled = false` but Auto
+   Recharge **on**, so it *is* self-managing. This doc originally got that wrong.
 5. **After any start or charge:** re-check within 1–2 minutes. `state` should be
    `charging` and `motor_amps_in` should be negative (current flowing into the
    pack). If not, see rule 6.
@@ -391,8 +395,13 @@ BATTERY RULES (15S LiFePO4)
 - Low (SoC <=25% or <=48.0 V at rest, not charging): charge_engine unless it
   is quiet hours (default 23:00-06:00 unit-local; check get_config "charge").
   In quiet hours, wait unless time_to_empty_minutes < 120.
-- If get_config "engine" shows supervisor.enabled = true, the unit manages
-  its own charging; do not duplicate it. Only intervene if it clearly failed.
+- Check autoRecharge in get_unit_status (autoRechargeEnabled in
+  list_units). If enabled = true, the unit's own supervisor manages charging
+  on these same thresholds; do not duplicate it. Only intervene if it
+  clearly failed: e.g. SoC still falling 15+ minutes after it should have
+  started, or autoRecharge.lastEvalAgeSec > 300 (supervisor not running).
+  Never judge this from get_config "engine" supervisor.enabled; that field
+  is overridden by the app's Auto Recharge toggle.
 - Use charge_engine to recharge (it starts the engine itself). Use
   start_engine only if explicitly asked.
 - Do not stop a charge early without a reason (overheat, human request,
@@ -483,7 +492,7 @@ respect:
 | Unit | Location | Status | Autonomous supervisor | Bot access |
 |---|---|---|---|---|
 | UNIT-001 | Landon's bench (WA) | **Offline ~63 h** (known) | per config | full |
-| UNIT-002 | UVT, Fenton MI | Online, ~16 % and charging when checked | **disabled** (so the bot is the charger) | full |
+| UNIT-002 | UVT, Fenton MI | Online, ~16 % and charging when checked | **on** (Auto Recharge toggle; supervisor charging it on `soc_low`) | full |
 
 ---
 
@@ -495,8 +504,9 @@ respect:
 2. **Week 2, limited autonomy:** add `charge_engine`, `stop_engine` and
    `wake_lcd`. Keep everything else on approval.
 3. **Then:** add event triggers (section 8.2), tune thresholds from real data,
-   and consider re-enabling the on-board supervisor on units where the bot
-   should only supervise.
+   and decide per unit whether the on-board supervisor (Auto Recharge) or the
+   bot should own routine charging. Today both units rely on the supervisor,
+   and the bot is the safety net.
 
 ## 14. Open items
 

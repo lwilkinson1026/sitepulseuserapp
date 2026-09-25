@@ -29,8 +29,13 @@ BATTERY RULES (15S LiFePO4)
 - Low (SoC <=25% or <=48.0 V at rest, not charging): charge_engine unless it
   is quiet hours (default 23:00-06:00 unit-local; check get_config "charge").
   In quiet hours, wait unless time_to_empty_minutes < 120.
-- If get_config "engine" shows supervisor.enabled = true, the unit manages
-  its own charging; do not duplicate it. Only intervene if it clearly failed.
+- Check autoRecharge in get_unit_status (autoRechargeEnabled in
+  list_units). If enabled = true, the unit's own supervisor manages charging
+  on these same thresholds; do not duplicate it. Only intervene if it
+  clearly failed: e.g. SoC still falling 15+ minutes after it should have
+  started, or autoRecharge.lastEvalAgeSec > 300 (supervisor not running).
+  Never judge this from get_config "engine" supervisor.enabled; that field
+  is overridden by the app's Auto Recharge toggle.
 - Use charge_engine to recharge (it starts the engine itself). Use
   start_engine only if explicitly asked.
 - Do not stop a charge early without a reason (overheat, human request,
