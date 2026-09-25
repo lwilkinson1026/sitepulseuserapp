@@ -34,6 +34,7 @@ const KIND_LABEL: Record<EventKind, string> = {
   'fuel.low':       'LOW FUEL',
   'fuel.empty':     'OUT OF FUEL',
   'bot.command':    'FLEET BOT',
+  'battery.low':    'BATTERY LOW',
 };
 
 // Pull a one-line summary out of the event payload. Different event kinds
