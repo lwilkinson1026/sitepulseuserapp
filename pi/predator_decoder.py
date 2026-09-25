@@ -420,8 +420,38 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
         if None in (d_thousands, d_hundreds, d_tens, d_ones):
             output_watts = None
         else:
+            # Leading blanks are how the panel renders a short number: 37 W
+            # arrives as "  37".  A blank *between* digits is not a number at
+            # all — a real display cannot show "4_37" — so it means one digit
+            # register failed to latch.  Same torn-frame class as the SoC
+            # decoder's partial-frame check, and the same answer: reject it
+            # rather than emit a plausible-looking number.
+            #
+            # Until 2026-09-01 this fell straight into int(), which raised
+            # ValueError out of decode_frame() and was caught by the publish
+            # loop's catch-all — dropping the WHOLE snapshot for that cycle,
+            # motor telemetry included, under the misleading log line
+            # "[firestore] write failed".  Seen 171 times over four days.
             digits_str = (d_thousands + d_hundreds + d_tens + d_ones).lstrip(" ")
-            output_watts = int(digits_str) if digits_str else 0
+            if " " in digits_str:
+                warnings.append(
+                    f"torn watts frame: blank digit between digits "
+                    f"({digits_str!r} from 0x{regs[0x02]:02X},0x{regs[0x03]:02X},"
+                    f"0x{regs[0x04]:02X},0x{regs[0x11]:02X})"
+                )
+                output_watts = None
+            else:
+                # Defensive: every remaining char comes from _WATTS_DIGITS and
+                # is a digit, so this cannot raise today.  It is here because
+                # the failure mode it guards costs an entire publish cycle,
+                # not just this field.
+                try:
+                    output_watts = int(digits_str) if digits_str else 0
+                except ValueError:
+                    warnings.append(
+                        f"unparseable watts digits {digits_str!r}"
+                    )
+                    output_watts = None
 
     # ── HH:MM (regs 0x0B, 0x0C+colon, 0x0D, 0x0E) ─────────────────────────
     # One field on the glass, two meanings.  The panel relabels it
