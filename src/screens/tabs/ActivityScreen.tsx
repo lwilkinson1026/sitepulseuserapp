@@ -33,6 +33,7 @@ const KIND_LABEL: Record<EventKind, string> = {
   'fuel.refuel':    'REFUELED',
   'fuel.low':       'LOW FUEL',
   'fuel.empty':     'OUT OF FUEL',
+  'bot.command':    'FLEET BOT',
 };
 
 // Pull a one-line summary out of the event payload. Different event kinds
@@ -51,6 +52,11 @@ function summarize(event: EventEntry): string {
     case 'engine.stop': {
       const reason = typeof p.reason === 'string' ? p.reason.toUpperCase() : null;
       return reason ?? (event.source === 'app' ? 'MANUAL' : 'AUTO');
+    }
+    case 'bot.command': {
+      const tool = typeof p.tool === 'string' ? p.tool.replace(/_/g, ' ').toUpperCase() : 'COMMAND';
+      const why = typeof p.reason === 'string' ? `  ·  ${p.reason}` : '';
+      return `${tool}${why}`;
     }
     case 'light.toggled': {
       const mode = typeof p.mode === 'string' ? p.mode.toUpperCase() : '—';

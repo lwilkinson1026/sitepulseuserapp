@@ -500,7 +500,9 @@ export type EventKind =
   // they can ride the existing pushFanout notification path.
   | 'fuel.refuel'
   | 'fuel.low'
-  | 'fuel.empty';
+  | 'fuel.empty'
+  // AI fleet bot took a significant action (functions/src/fleetMcp.ts)
+  | 'bot.command';
 
 export interface EventDoc {
   kind: EventKind;

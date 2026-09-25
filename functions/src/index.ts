@@ -5,3 +5,4 @@
 
 export { onEventCreated } from './pushFanout';
 export { createRentalCheckout, createBillingPortal, stripeWebhook } from './billing';
+export { fleetMcp } from './fleetMcp';

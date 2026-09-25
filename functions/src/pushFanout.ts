@@ -82,6 +82,12 @@ const COPY: Record<string, { title: string; body: (payload: Record<string, unkno
         : `Pi at ${t}${limit}. Rising; check airflow before it throttles.`;
     },
   },
+  // Written by the fleet MCP server (fleetMcp.ts) whenever the AI bot takes
+  // a significant action, so the owner always hears about it.
+  'bot.command': {
+    title: 'Fleet bot action',
+    body: (p) => `${p.tool ?? p.command ?? 'command'}: ${p.reason ?? 'no reason given'}`,
+  },
   'system.overheat.cleared': {
     title: 'Controller temperature normal',
     body: (p) =>
