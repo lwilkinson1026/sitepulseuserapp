@@ -225,7 +225,7 @@ class DecodedFrame(TypedDict):
     """Result of decoding one 18-byte register snapshot."""
     battery_soc:           Optional[int]   # 0-100, None if SoC bytes are unmapped
     dc_active:             bool            # DC outlet button currently enabled (bit 7 of reg 0x11)
-    ac_active:             bool            # AC outlet button currently enabled (deduced from bus pattern)
+    ac_active:             Optional[bool]  # AC outlet enabled; None = unknowable from this frame (engine-charge layout clears the flag register)
     output_mode:           str             # "AC", "DC", "AC+DC", "off" (derived for app convenience)
     output_watts:          Optional[int]   # current draw, None if any digit unmapped
     time_to_empty_minutes: Optional[int]   # parsed HH:MM, None if unmapped or colon missing
@@ -306,13 +306,45 @@ def _time_digit(byte: int, allow_colon: bool, warnings: list[str], position: str
 
 # ─── Public API ────────────────────────────────────────────────────────────
 
-def decode_frame(regs: list[int]) -> DecodedFrame:
+def output_mode_from_flags(output_section: bool, dc_active: bool, ac_active: bool) -> str:
+    """Map the outlet flags to output_mode. Public so the publisher can
+    recompute it after resolving an unknown AC flag (engine charging)."""
+    if not output_section:
+        return "off"
+    if dc_active and ac_active:
+        return "AC+DC"
+    if dc_active:
+        return "DC"
+    if ac_active:
+        return "AC"
+    # Display awake, output label lit, but neither outlet flagged. Real and
+    # routine: the panel sits here after AC is switched off but before it
+    # sleeps.  Previously this fell through to "AC", which is exactly
+    # backwards.
+    return "off"
+
+
+def system_mode_from(charging: bool, output_mode: str) -> str:
+    """See the system_mode comment in decode_frame()."""
+    if charging:
+        return "charging"
+    if output_mode in ("AC", "DC", "AC+DC"):
+        return "discharging"
+    return "idle"
+
+
+def decode_frame(regs: list[int], external_charging: bool = False) -> DecodedFrame:
     """Decode an 18-byte register snapshot (regs[0x00]..regs[0x11]) into a
     structured display state.  Never raises — unknown bytes show up as
     None fields and entries in warnings[].
 
     Args:
         regs: list of 18 integers, indexed by register address (0..17).
+        external_charging: True while the pack is being charged through the
+            48 V battery connection (engine regen via the VESC) rather than
+            the Predator's own charge input. The caller knows this from the
+            motor controller; the frame alone cannot tell it apart from a
+            dark output row. See the output-row comment below.
 
     Returns:
         DecodedFrame dict ready to merge into the Firestore snapshot.
@@ -363,7 +395,30 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # it charges.  Photographed directly — during a charge the "OUT" and
     # "WATTS" legends are unlit silkscreen while the HH:MM field is still
     # emissive.
-    output_section = display_awake and not charging and bool(regs[0x0F] & _OUTPUT_ROW_MASK)
+    output_row_lit = bool(regs[0x0F] & _OUTPUT_ROW_MASK)
+
+    # Engine charging through the 48 V battery connection is NOT a dark
+    # output row, even though the registers say so. Observed on UNIT-002
+    # 2026-09-25 with Landon at the unit: while the engine regen-charged the
+    # pack, reg 0x0F and 0x10 read 00/00 in every frame — exactly the "row
+    # dark" signature — yet the physical LCD kept showing the normal
+    # discharge screen, and the watts digits (0x02-0x04, 0x11) kept tracking
+    # the real ~40 W DC load (33-45 W charging vs 38-44 W the moment the
+    # engine stopped and the flags came back as 18/08). DC's bit 7 on 0x11
+    # stayed set throughout. The controller evidently sees reverse current
+    # and clears those two flag registers without changing what it draws.
+    #
+    # This is distinguishable from the wall charger, which is what the "row
+    # dark" rule was built on: wall charging sets reg 0x07 bits 0x24
+    # (`charging` above); engine charging leaves 0x07 at 0x01. The frame
+    # alone can't separate engine-charging from a genuinely dark row, so the
+    # caller has to say so via `external_charging`.
+    #
+    # Earlier notes (2026-08-27) read a 40-minute blank during an engine
+    # charge as "output row genuinely dark". It wasn't.
+    engine_charge_layout = display_awake and external_charging and not charging and not output_row_lit
+
+    output_section = display_awake and not charging and (output_row_lit or engine_charge_layout)
 
     # Both outlet flags are only meaningful while the output row is lit.
     # During the wake/sleep transition the panel latches one of them a frame
@@ -372,7 +427,13 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # ac_active/dc_active consistent with output_mode, so the app can never
     # be handed mode="off" or system_mode="charging" alongside ac_active=True.
     dc_active     = output_section and bool(regs[0x11] & 0x80)
-    ac_active     = output_section and bool(regs[0x10] & 0x10)
+    # AC lives in reg 0x10, which the engine-charge layout clears along with
+    # 0x0F — so during an engine charge the frame genuinely does not say
+    # whether AC is on. Report None (unknown) rather than a confident False;
+    # the publisher holds the last value it actually saw.
+    ac_active: Optional[bool] = (
+        None if engine_charge_layout else output_section and bool(regs[0x10] & 0x10)
+    )
 
     if charging and (regs[0x0F] or not any(regs[0x08:0x0B])):
         # Three independent things move when the charger goes in: reg 0x07
@@ -389,20 +450,7 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # A frame can show AC or DC set while the output row is clear during the
     # display's wake/sleep transition.  Treat that as off rather than
     # reporting a mode built from a half-latched frame.
-    if not output_section:
-        output_mode = "off"
-    elif dc_active and ac_active:
-        output_mode = "AC+DC"
-    elif dc_active:
-        output_mode = "DC"
-    elif ac_active:
-        output_mode = "AC"
-    else:
-        # Display awake, output label lit, but neither outlet flagged. Real
-        # and routine: the panel sits here after AC is switched off but
-        # before it sleeps.  Previously this fell through to "AC", which is
-        # exactly backwards.
-        output_mode = "off"
+    output_mode = output_mode_from_flags(output_section, dc_active, bool(ac_active))
 
     # ── watts (1-4 digits across reg 0x02, 0x03, 0x04, 0x11) ──────────────
     # Gated on the output row, not merely on the display being awake.  While
@@ -462,7 +510,10 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     time_to_full_minutes: Optional[int] = None
     if charging:
         time_to_full_minutes = _decode_hhmm(regs, warnings, "time-to-full", strip_all=True)
-    elif output_section:
+    elif output_section and not engine_charge_layout:
+        # Not during an engine charge: the HH:MM registers then carry bit 7
+        # on every digit, like the wall-charge layout, and what they show
+        # has not been checked against the glass. Blank beats a guess.
         time_to_empty_minutes = _decode_hhmm(regs, warnings, "time-to-empty")
 
     # ── system_mode (matches the field scheduler.py and the app expect) ──
@@ -478,12 +529,7 @@ def decode_frame(regs: list[int]) -> DecodedFrame:
     # the engine off".  It had never fired before because ac_active could not
     # previously be true at the same time as dc_active.  Making AC detection
     # work is what exposed it.
-    if charging:
-        system_mode = "charging"
-    elif output_mode in ("AC", "DC", "AC+DC"):
-        system_mode = "discharging"
-    else:
-        system_mode = "idle"
+    system_mode = system_mode_from(charging, output_mode)
 
     return DecodedFrame(
         battery_soc=battery_soc,
@@ -589,7 +635,9 @@ _VOTED_FIELDS = (
 )
 
 
-def decode_frames_majority(frames: list[list[int]]) -> Optional[DecodedFrame]:
+def decode_frames_majority(
+    frames: list[list[int]], external_charging: bool = False
+) -> Optional[DecodedFrame]:
     """Decode every frame captured in one sample window and return the
     per-field majority value.
 
@@ -613,7 +661,7 @@ def decode_frames_majority(frames: list[list[int]]) -> Optional[DecodedFrame]:
     if not frames:
         return None
 
-    decoded = [decode_frame(f) for f in frames]
+    decoded = [decode_frame(f, external_charging) for f in frames]
 
     out: dict = {}
     for field in _VOTED_FIELDS:
