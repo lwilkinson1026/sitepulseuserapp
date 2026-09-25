@@ -48,7 +48,13 @@ from firebase_admin import credentials, firestore
 
 import burst
 import pi_health
-from predator_decoder import FrameAssembler, decode_frame, decode_frames_majority
+from predator_decoder import (
+    FrameAssembler,
+    decode_frame,
+    decode_frames_majority,
+    output_mode_from_flags,
+    system_mode_from,
+)
 from predator_i2c_sniffer import PassiveI2cSniffer
 from vesc_listener import VescListener
 
@@ -127,6 +133,47 @@ _LCD_DERIVED_FIELDS = (
     "time_to_empty_minutes",
     "time_to_full_minutes",
 )
+
+# ── SoC continuity guard ──────────────────────────────────────────────────
+# Ceiling on how fast a *believable* SoC reading can move, in percentage
+# points per minute.
+#
+# The per-field majority vote in decode_frames_majority() is a plurality over
+# whatever decoded in the window, so a torn frame can still win a thin one.
+# The specific failure that gets through: _decode_battery_soc() treats a blank
+# tens digit as "genuinely below 10 %", because real readings do blank it under
+# 10 — so a frame that drops the tens digit turns 72 % into 2 % and 71 % into
+# 1 %. Both are well-formed, in range, and indistinguishable from a real
+# reading by any check that only sees one frame. Only continuity over time
+# tells them apart, which is why this lives here and not in the decoder.
+#
+# Observed on UNIT-002 2026-08-26: those readings drove the supervisor to
+# short-cycle the engine ~12 times in two hours on reason=soc_low.
+#
+# For scale, a ~2 kWh pack at the Predator's full 2 kW draw moves ~1.7 %/min.
+# 20 %/min is ~12x that headroom and still rejects the 72 -> 2 jump (70 points
+# in 15 s, i.e. 280 %/min) by more than an order of magnitude.
+SOC_MAX_SLEW_PCT_PER_MIN = float(
+    os.environ.get("SITEPULSE_SOC_MAX_SLEW_PCT_PER_MIN", "20")
+)
+
+# How long the guard keeps rejecting before it gives up and trusts what it is
+# being told again.
+#
+# Without this the guard deadlocks on any genuine discontinuity — a pack swap,
+# or a panel that slept through a real charge and wakes reporting a legitimately
+# different number — because every new value would be measured forever against
+# a reference that can never be replaced. Rejections deliberately do NOT
+# refresh the reference timestamp, so this window keeps widening until it trips
+# and re-seeds on its own.
+SOC_RESEED_S = float(os.environ.get("SITEPULSE_SOC_RESEED_S", "120"))
+
+# Pack current (A) flowing INTO the battery through the VESC above which the
+# engine counts as charging it. Regen runs ~8-13 A on UNIT-002; the VESC idles
+# at ~0. Engine charging changes what the Predator puts on its I²C bus (see
+# predator_decoder: engine_charge_layout), so the decoder needs to know.
+EXT_CHARGE_AMPS = float(os.environ.get("SITEPULSE_EXT_CHARGE_AMPS", "2.0"))
+
 DEBUG              = os.environ.get("SITEPULSE_DEBUG") == "1"
 # VESC integration is opt-out so the publisher still runs cleanly on a
 # bench Pi without the CAN HAT seated. Set to "0" to disable.
@@ -169,6 +216,72 @@ stats = _Stats()
 _vesc: Optional[VescListener] = None
 
 
+# Last SoC the guard accepted, and the monotonic stamp when it accepted it.
+# Module-level rather than a _Stats field because _Stats.reset() runs on every
+# publish cycle and this reference has to outlive the window it came from.
+# Last AC state actually read off the panel. During an engine charge the
+# Predator clears the register that carries the AC flag, so the frame cannot
+# say; we hold this rather than report a confident "off". Nothing else turns
+# the inverter's AC on or off while the engine runs except a button press,
+# which the listener performs and the next lit frame confirms.
+_last_ac_active: Optional[bool] = None
+_soc_ref: Optional[int] = None
+_soc_ref_at: float = 0.0
+
+
+def _believable_soc(
+    soc: Optional[int], now: float
+) -> tuple[Optional[int], Optional[str]]:
+    """Gate a freshly-voted SoC against the last one we accepted.
+
+    A rejected reading publishes as None — the same "we do not know" this
+    module already emits for a dark panel — rather than as the previous
+    value, which would mean inventing a reading nobody measured.
+
+    Returns (value_to_publish, warning_or_None).
+    """
+    global _soc_ref, _soc_ref_at
+
+    if soc is None:
+        return None, None
+
+    if _soc_ref is None or (now - _soc_ref_at) > SOC_RESEED_S:
+        _soc_ref, _soc_ref_at = soc, now
+        return soc, None
+
+    elapsed_s = max(now - _soc_ref_at, 0.001)
+    allowed = SOC_MAX_SLEW_PCT_PER_MIN * (elapsed_s / 60.0)
+    if abs(soc - _soc_ref) > allowed:
+        return None, (
+            f"implausible SoC jump: {_soc_ref}% -> {soc}% in {elapsed_s:.1f}s "
+            f"(max {allowed:.1f} pts); rejecting, re-seeding in "
+            f"{SOC_RESEED_S - (now - _soc_ref_at):.0f}s"
+        )
+
+    _soc_ref, _soc_ref_at = soc, now
+    return soc, None
+
+
+def _resolve_ac(decoded: dict) -> None:
+    """Fill an unknown ac_active (engine-charge layout) from the last value
+    the panel actually showed, and keep output_mode/system_mode consistent
+    with whatever we settle on. Mutates `decoded`."""
+    global _last_ac_active
+    ac = decoded["ac_active"]
+    if ac is not None:
+        _last_ac_active = ac
+        return
+    held = bool(_last_ac_active)
+    decoded["ac_active"] = held
+    output_section = decoded["output_mode"] != "off" or decoded["output_watts"] is not None
+    decoded["output_mode"] = output_mode_from_flags(output_section, decoded["dc_active"], held)
+    decoded["system_mode"] = system_mode_from(decoded["charging"], decoded["output_mode"])
+    decoded["warnings"].append(
+        "engine charging hides the AC flag; holding last seen "
+        f"ac_active={_last_ac_active!r}"
+    )
+
+
 def build_snapshot() -> Optional[dict]:
     """Build the dict written to units/{UNIT_ID}/current/snapshot.
 
@@ -192,12 +305,23 @@ def build_snapshot() -> Optional[dict]:
     # Vote across the window when we have one. stats.last_raw_frame is the
     # fallback for the first publish after startup, before any window has
     # closed — one frame is still better than none.
+    vesc_snap = _vesc.snapshot() if _vesc is not None else {}
+    amps_in = vesc_snap.get("motor_amps_in")
+    external_charging = (
+        not vesc_snap.get("motor_stale", True)
+        and isinstance(amps_in, (int, float))
+        and amps_in <= -EXT_CHARGE_AMPS
+    )
+
     if stats.window_frames:
-        decoded = decode_frames_majority(stats.window_frames)
+        decoded = decode_frames_majority(stats.window_frames, external_charging)
     elif have_frame:
-        decoded = decode_frame(stats.last_raw_frame)
+        decoded = decode_frame(stats.last_raw_frame, external_charging)
     else:
         decoded = None
+
+    if decoded is not None:
+        _resolve_ac(decoded)
 
     # Frame rate: completed frames over the publish window.
     elapsed = max(0.001, time.monotonic() - stats.frames_window_start)
@@ -267,6 +391,16 @@ def build_snapshot() -> Optional[dict]:
         # is a claim we cannot make about a panel we can't see.
         snap["output_mode"] = "unknown"
         snap["system_mode"] = "unknown"
+
+    # ── SoC continuity gate ───────────────────────────────────────────────
+    # Deliberately after the staleness gate: a dark panel has already nulled
+    # battery_soc above, and feeding that None through here leaves the
+    # reference untouched, so the guard still has something to compare
+    # against when the panel wakes back up inside SOC_RESEED_S.
+    soc_value, soc_warning = _believable_soc(snap["battery_soc"], time.monotonic())
+    snap["battery_soc"] = soc_value
+    if soc_warning:
+        decoded["warnings"].append(soc_warning)
 
     if PUBLISH_RAW:
         snap["raw_frame_hex"] = " ".join(f"{b:02X}" for b in stats.last_raw_frame)
