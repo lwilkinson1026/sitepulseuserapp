@@ -49,7 +49,9 @@ State machine (published to units/{unit_id}/current/engine)
   idle            → before any crank attempt
   cranking        → crank loop running
   running         → engine caught; loop released the motor
-  failed_no_catch → max duration elapsed without a catch event
+  failed_no_catch → max duration elapsed without a catch event, or (under
+                    start.rpmConfirmEnabled) the engine never reached
+                    rpmConfirmMin after the catch — reason="rpm_not_confirmed"
   failed_no_load  → never observed real current draw (likely no motor)
   failed_error    → exception during crank (logged in `lastError`)
 
@@ -68,7 +70,7 @@ import os
 import struct
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
@@ -145,6 +147,19 @@ DEFAULT_START_CONFIG: Dict[str, Any] = {
     # PCA9685 is no longer fitted. With this false the start sequence skips
     # every choke step. Set it true on a unit that has a choke servo again.
     "chokeEnabled":            False,
+    # RPM-confirmed catch. The crank loop's catch test is current-based, and
+    # a cold engine that fires a few strokes and sputters passes it (UNIT-002,
+    # Sept 2026: "caught after 1.2s", then dead under load 60s later). With
+    # this on, the start only counts as running once the engine holds
+    # rpmConfirmMin mechanical RPM within rpmConfirmWindowSec of the catch; a
+    # genuine start reaches 5k+ in 10-20s, and anything short of ~4k is a
+    # sputter. A miss ends in failed_no_catch so the supervisor re-cranks
+    # after crankRetryDelaySec instead of waiting for the charge bog check.
+    "rpmConfirmEnabled":       False,
+    "rpmConfirmMin":           4000,          # mechanical RPM
+    "rpmConfirmWindowSec":     25.0,          # measured from the catch
+    "rpmConfirmHoldMs":        500,           # must stay above rpmConfirmMin this long
+    "motorPolePairs":          14,            # eRPM / polePairs = mechanical RPM (matches the app)
 }
 
 
@@ -695,9 +710,13 @@ def handle_engine_start(
         # 4. Post-crank
         sequence_total_s = round(time.monotonic() - sequence_started_at, 3)
 
+        confirm_rpm = bool(start_cfg.get("rpmConfirmEnabled", False))
+
         if result.state == "running":
-            # Engine caught. Stabilize, then open the choke.
-            _publish_state(db, unit_id, "running", {
+            # Engine caught. Stabilize, then open the choke. Under RPM
+            # confirmation the state stays "starting" until the engine proves
+            # it, so a sputter never shows (or fires the edge event) as running.
+            _publish_state(db, unit_id, "starting" if confirm_rpm else "running", {
                 **result.metadata,
                 "phase":           "stabilizing",
                 "sequenceTotalSec": sequence_total_s,
@@ -707,6 +726,36 @@ def handle_engine_start(
                 _choke(run_choke_preset)
             except Exception as e:
                 print(f"[engine.start] run-choke set failed: {e!r}", flush=True)
+
+        if result.state == "running" and confirm_rpm:
+            pole_pairs = max(1, int(start_cfg.get("motorPolePairs", 14)))
+            min_rpm    = int(start_cfg.get("rpmConfirmMin", 4000))
+            window_s   = max(1.0, float(start_cfg.get("rpmConfirmWindowSec", 25.0)))
+            hold_s     = max(0.0, float(start_cfg.get("rpmConfirmHoldMs", 500))) / 1000.0
+            _publish_state(db, unit_id, "starting", {
+                "phase":         "confirming_rpm",
+                "rpmConfirmMin": min_rpm,
+            })
+            # The window runs from the catch, so the settle above counts.
+            confirmed, peak_erpm, waited_s = _wait_for_rpm_confirm(
+                min_rpm * pole_pairs, max(1.0, window_s - post_catch_s), hold_s,
+            )
+            peak_rpm = None if peak_erpm is None else peak_erpm // pole_pairs
+            if confirmed:
+                result.metadata["confirmedRpm"] = peak_rpm
+            else:
+                # Caught on current, never ran. Same outcome as a crank that
+                # never fired: cleanup below, and the supervisor re-cranks.
+                result = _CrankResult("failed_no_catch", {
+                    **result.metadata,
+                    "reason":        "rpm_not_confirmed",
+                    "peakRpm":       peak_rpm,
+                    "rpmConfirmMin": min_rpm,
+                    "confirmSec":    round(post_catch_s + waited_s, 1),
+                })
+            sequence_total_s = round(time.monotonic() - sequence_started_at, 3)
+
+        if result.state == "running":
             _publish_state(db, unit_id, "running", {
                 **result.metadata,
                 "phase":           "complete",
@@ -1135,6 +1184,42 @@ def _wait_for_rpm_idle(threshold: int, timeout_sec: float) -> Optional[int]:
             if abs(last_rpm) <= threshold:
                 return last_rpm
         return last_rpm
+    finally:
+        sender.close()
+
+
+def _wait_for_rpm_confirm(
+    min_erpm: int, window_sec: float, hold_sec: float,
+) -> Tuple[bool, Optional[int], float]:
+    """Watch the bus until |eRPM| has held at/above min_erpm for hold_sec, or
+    window_sec runs out. Returns (confirmed, peak |eRPM| seen, seconds spent).
+    Sign is ignored: rotation direction is a VESC wiring convention."""
+    sender = VescSender(iface=VESC_IFACE, unit_id=VESC_UNIT_ID)
+    started = time.monotonic()
+    peak: Optional[int] = None
+    try:
+        sender.open()
+        bus = sender._bus  # noqa: SLF001
+        status1_id = (CMD_STATUS_1 << 8) | (sender.unit_id & 0xFF)
+        deadline = started + window_sec
+        above_since: Optional[float] = None
+        while time.monotonic() < deadline:
+            msg = bus.recv(timeout=0.2)
+            if msg is None or not msg.is_extended_id or len(msg.data) < 8:
+                continue
+            if msg.arbitration_id != status1_id:
+                continue
+            erpm = abs(struct.unpack(">i", msg.data[0:4])[0])
+            peak = erpm if peak is None else max(peak, erpm)
+            now = time.monotonic()
+            if erpm >= min_erpm:
+                if above_since is None:
+                    above_since = now
+                if now - above_since >= hold_sec:
+                    return True, peak, round(now - started, 1)
+            else:
+                above_since = None
+        return False, peak, round(time.monotonic() - started, 1)
     finally:
         sender.close()
 
