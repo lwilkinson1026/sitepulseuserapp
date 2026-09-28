@@ -199,6 +199,14 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
             # On crank failure, turn the spark relay back off so a dead
             # engine isn't sitting with the ignition energized.
             "turnOffSparkOnFailure": True,
+            # RPM-confirmed catch: a start only counts once the engine holds
+            # rpmConfirmMin mechanical RPM within rpmConfirmWindowSec of the
+            # catch. Off by default; turn on per unit (UNIT-002 first).
+            "rpmConfirmEnabled":     False,
+            "rpmConfirmMin":         4000,  # mechanical RPM; real starts reach 5k+
+            "rpmConfirmWindowSec":   25,
+            "rpmConfirmHoldMs":      500,
+            "motorPolePairs":        14,    # eRPM / polePairs = mechanical RPM
         },
         # Regen charging (engine.charge command). Runs in a background
         # thread on the Pi; engine.stop is the only thing that can
