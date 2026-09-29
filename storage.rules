@@ -2,7 +2,8 @@ rules_version = '2';
 
 // SitePulse Firebase Storage rules.
 //
-// Only the owner of a unit can read its clips. Uploads are server-only —
+// Only the owner of a unit — or a fleet admin (`admin: true` custom claim,
+// see firestore.rules) — can read its clips. Uploads are server-only —
 // the Pi uses the Admin SDK (which bypasses rules) to push MP4s from
 // pi/sentry.py. The client never writes here.
 //
@@ -22,8 +23,12 @@ service firebase.storage {
         && firestore.get(/databases/(default)/documents/units/$(unitId)).data.ownerId == request.auth.uid;
     }
 
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
     match /units/{unitId}/clips/{filename} {
-      allow read:  if isUnitOwner(unitId);
+      allow read:  if isAdmin() || isUnitOwner(unitId);
       allow write: if false;
     }
 

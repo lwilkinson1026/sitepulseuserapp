@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { BillingAlertBanner, CornerBrackets, Eyebrow, FigCaption, FuelAlertBanner, Screen, SecondaryCTA } from '../../components';
+import { BillingAlertBanner, CornerBrackets, Eyebrow, FigCaption, FuelAlertBanner, Screen, SecondaryCTA, UnitSwitcher } from '../../components';
 import { useUnitTelemetry } from '../../hooks/useUnitTelemetry';
 import { useUnitDoc } from '../../hooks/useUnitDoc';
 import { useAuth } from '../../hooks/AuthContext';
@@ -312,6 +312,7 @@ export function DashboardScreen() {
   if (loading) {
     return (
       <Screen>
+        <UnitSwitcher />
         <View style={styles.center}>
           <ActivityIndicator color={colors.textMuted} />
           <Text style={styles.connectLabel}>SUBSCRIBING  ·  {unitId}</Text>
@@ -323,6 +324,7 @@ export function DashboardScreen() {
   if (error) {
     return (
       <Screen>
+        <UnitSwitcher />
         <View style={styles.center}>
           <Text style={[styles.connectLabel, { color: colors.danger }]}>
             FIRESTORE ERROR
@@ -338,6 +340,7 @@ export function DashboardScreen() {
   if (!snapshot) {
     return (
       <Screen>
+        <UnitSwitcher />
         <View style={styles.center}>
           <Text style={styles.connectLabel}>NO TELEMETRY YET</Text>
           <Text style={styles.connectHint}>
@@ -445,6 +448,7 @@ export function DashboardScreen() {
           staleness={stalenessKind}
         />
 
+        <UnitSwitcher />
         <FuelAlertBanner unitId={unitId} />
         <BillingAlertBanner unitId={unitId} />
 

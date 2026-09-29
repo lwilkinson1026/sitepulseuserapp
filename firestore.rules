@@ -2,7 +2,13 @@ rules_version = '2';
 
 // SitePulse Firestore security rules.
 //
-// Ownership model (spec §6): a unit has at most one owner. The Pi authenticates
+// Ownership model (spec §6): a unit has at most one owner. On top of that,
+// SitePulse staff accounts carrying the `admin: true` custom claim can read
+// and command EVERY unit — that is how we keep service access to a rented
+// unit after its customer becomes the owner. The claim is set server-side
+// only (Admin SDK); a client cannot grant it to itself.
+//
+// The Pi authenticates
 // with a service-account key via the Admin SDK, which bypasses these rules
 // entirely — so the rules only need to constrain *client* (mobile app) access.
 //
@@ -18,10 +24,21 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
     function isOwnerOf(unitId) {
       return isSignedIn()
         && exists(/databases/$(database)/documents/units/$(unitId))
         && get(/databases/$(database)/documents/units/$(unitId)).data.ownerId == request.auth.uid;
+    }
+
+    // Owner or fleet admin. Everything a customer can see or do on their unit,
+    // an admin can too — except managing members (owner's call) and starting
+    // Stripe billing (the payer's call, enforced in functions/src/billing.ts).
+    function canAccess(unitId) {
+      return isAdmin() || isOwnerOf(unitId);
     }
 
     // ── user profiles ──────────────────────────────────────────────────────
@@ -54,18 +71,22 @@ service cloud.firestore {
       // discover which unit the signed-in user owns.
       //
       // Not a loosening: the predicate is still evaluated per document, so an
-      // *unfiltered* list of /units stays denied.
+      // *unfiltered* list of /units stays denied to non-admins.
       //
-      // Subcollections below keep isOwnerOf(). Their rules key off the parent
+      // Subcollections below use canAccess(). Their rules key off the parent
       // unit rather than off fields of the documents being listed, so they are
       // already verifiable and already work.
-      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      //
+      // Admins skip the filter requirement: isAdmin() depends only on the
+      // token, so an unfiltered list of /units is provably safe for them.
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.ownerId == request.auth.uid);
       allow write: if false;
 
-      // Live telemetry. Read-only for the owner; written by the Pi.
+      // Live telemetry. Read-only for the owner (and admins); written by the Pi.
       // Covers snapshot + light/sentry/engine/camera state docs.
       match /current/{doc} {
-        allow read: if isOwnerOf(unitId);
+        allow read: if canAccess(unitId);
         allow write: if false;
       }
 
@@ -73,31 +94,31 @@ service cloud.firestore {
       // Owner-readable. Mutations go through *.update commands so the Pi
       // can validate them — never direct writes from the client.
       match /config/{doc} {
-        allow read: if isOwnerOf(unitId);
+        allow read: if canAccess(unitId);
         allow write: if false;
       }
 
       // Sentry clip metadata (the MP4 itself lives in Storage rules).
       match /clips/{clipId} {
-        allow read: if isOwnerOf(unitId);
+        allow read: if canAccess(unitId);
         allow write: if false;
       }
 
       // Hourly rollups for history charts.
       match /history/{ts} {
-        allow read: if isOwnerOf(unitId);
+        allow read: if canAccess(unitId);
         allow write: if false;
       }
 
       // Commands. Owner can create + read + cancel their own intents.
       // The Pi ACKs by writing the status field; the client must not edit it.
       match /commands/{cmdId} {
-        allow read: if isOwnerOf(unitId);
-        allow create: if isOwnerOf(unitId)
+        allow read: if canAccess(unitId);
+        allow create: if canAccess(unitId)
                      && request.resource.data.issuedBy == request.auth.uid
                      && request.resource.data.status == 'pending';
         allow update: if false;    // only the Pi updates status
-        allow delete: if isOwnerOf(unitId)
+        allow delete: if canAccess(unitId)
                      && resource.data.status == 'pending';
       }
 
@@ -107,8 +128,8 @@ service cloud.firestore {
       // about their own tank with no hardware side effects. Kept deliberately
       // narrow: only that one kind, and never editable/deletable once written.
       match /events/{evtId} {
-        allow read: if isOwnerOf(unitId);
-        allow create: if isOwnerOf(unitId)
+        allow read: if canAccess(unitId);
+        allow create: if canAccess(unitId)
                      && request.resource.data.kind == 'fuel.refuel'
                      && request.resource.data.source == 'app';
         allow update, delete: if false;
@@ -118,15 +139,15 @@ service cloud.firestore {
       // preferences with no hardware effect, so — unlike config/* — the owner
       // writes these directly instead of round-tripping a command.
       match /fuel/{doc} {
-        allow read, write: if isOwnerOf(unitId);
+        allow read, write: if canAccess(unitId);
       }
 
-      // Rental billing (plan + Stripe subscription snapshot). Owner reads to
-      // render billing status; only Cloud Functions write — the plan via the
+      // Rental billing (plan + Stripe subscription snapshot). Owner (and
+      // admins, read-only) read to render billing status; only Cloud Functions write — the plan via the
       // admin setup script, the subscription via the Stripe webhook. A client
       // write here could fake "active", so it is never allowed.
       match /billing/{doc} {
-        allow read: if isOwnerOf(unitId);
+        allow read: if canAccess(unitId);
         allow write: if false;
       }
 
