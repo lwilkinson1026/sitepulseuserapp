@@ -8,3 +8,4 @@ export { Screen } from './Screen';
 export { FuelPanel } from './FuelPanel';
 export { FuelAlertBanner } from './FuelAlertBanner';
 export { BillingPanel, BillingAlertBanner } from './BillingPanel';
+export { UnitSwitcher } from './UnitSwitcher';

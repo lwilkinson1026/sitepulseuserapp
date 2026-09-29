@@ -3,6 +3,10 @@
 //
 // All state comes from Firestore docs the Stripe webhook maintains; buttons
 // only ever hand off to Stripe-hosted pages (Checkout / Customer Portal).
+//
+// Those buttons are for the paying owner only. A fleet admin viewing a
+// customer's unit sees the status read-only — the billing functions would
+// refuse them anyway, and staff must not be one tap from the customer's card.
 
 import React, { useState } from 'react';
 import { Linking, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -12,6 +16,7 @@ import { PrimaryCTA } from './PrimaryCTA';
 import { SecondaryCTA } from './SecondaryCTA';
 import { formatMoney, useBilling } from '../hooks/useBilling';
 import { openBillingPortal, startRentalCheckout } from '../firebase/billing';
+import { useActiveUnit } from '../hooks/ActiveUnitContext';
 import { colors, fonts, hairline, spacing, tracking, typeScale } from '../theme';
 
 function fmtDate(ts: Timestamp | null | undefined): string {
@@ -52,6 +57,7 @@ function useBillingAction(unitId: string | null) {
 export function BillingPanel({ unitId }: { unitId: string | null }) {
   const { phase, plan, subscription } = useBilling(unitId);
   const { busy, error, run } = useBillingAction(unitId);
+  const { isOwner } = useActiveUnit();
   if (phase === 'none' || !plan) return null;
 
   const price = `${formatMoney(plan.amountCents, plan.currency)} / ${plan.interval.toUpperCase()}`;
@@ -93,7 +99,11 @@ export function BillingPanel({ unitId }: { unitId: string | null }) {
         ) : null}
       </View>
 
-      {confirming ? (
+      {!isOwner ? (
+        <Text style={styles.note}>
+          ADMIN VIEW — PAYMENT IS MANAGED BY THE UNIT OWNER FROM THEIR ACCOUNT.
+        </Text>
+      ) : confirming ? (
         <Text style={styles.note}>
           PAYMENT RECEIVED BY STRIPE — THIS UPDATES AUTOMATICALLY IN A FEW SECONDS.
         </Text>
@@ -139,6 +149,8 @@ export function BillingPanel({ unitId }: { unitId: string | null }) {
 export function BillingAlertBanner({ unitId }: { unitId: string | null }) {
   const { phase } = useBilling(unitId);
   const { busy, run } = useBillingAction(unitId);
+  const { isOwner } = useActiveUnit();
+  if (!isOwner) return null;
   if (phase !== 'needs_setup' && phase !== 'past_due') return null;
   if (justReturnedFromCheckout()) return null;
 

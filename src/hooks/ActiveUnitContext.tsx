@@ -14,14 +14,20 @@
 // EXPO_PUBLIC_DEV_UNIT_ID survives only as a *preference among units the user
 // actually owns* (see PINNED_UNIT_ID below) — it can no longer point the app
 // at a unit the signed-in user has no access to.
+//
+// Fleet admins (the `admin: true` claim — see AuthContext) are the exception:
+// they list every unit and can switch between them with setUnitId(). The
+// choice is remembered per device so a restart reopens the same unit.
 
 import React, {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
   useState,
 } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { getFirebase } from '../firebase/config';
 import type { UnitDoc } from '../firebase/types';
@@ -29,14 +35,17 @@ import { useAuth } from './AuthContext';
 
 /**
  * Optional bench convenience: when an admin owns more than one unit, pin which
- * one opens by default. Treated as a filter over owned units, never as an
- * override — if the signed-in user doesn't own it, it is ignored.
+ * one opens by default. Treated as a filter over accessible units, never as an
+ * override — if the signed-in user can't open it, it is ignored.
  *
  * Trimmed and emptiness-checked rather than defaulted with `??`, because `??`
  * only falls back on null/undefined. An env var set to "" in the hosting
  * provider is a string, passes `??`, and would silently become the pin.
  */
 const PINNED_UNIT_ID = (process.env.EXPO_PUBLIC_DEV_UNIT_ID ?? '').trim() || null;
+
+/** Where the unit switcher remembers the last pick on this device. */
+const SELECTED_UNIT_KEY = 'sitepulse.selectedUnitId';
 
 export type ActiveUnitState = {
   /** True until the first Firestore response (or immediately false if signed out). */
@@ -45,8 +54,19 @@ export type ActiveUnitState = {
   unitId: string | null;
   /** The resolved unit document, for cellCount, timezone, serial, theftFlag, etc. */
   unit: UnitDoc | null;
-  /** Every unit this user owns, for a future unit-switcher. */
-  ownedUnitIds: string[];
+  /**
+   * Every unit this user can open: the ones they own, or — for a fleet
+   * admin — every unit. Sorted. More than one means show the switcher.
+   */
+  unitIds: string[];
+  /**
+   * True when the signed-in user owns the active unit. False for an admin
+   * looking at a customer's unit — the UI uses it to keep payer-only actions
+   * (Stripe checkout / billing portal) away from staff.
+   */
+  isOwner: boolean;
+  /** Switch the active unit. Ignored for ids not in `unitIds`. */
+  setUnitId: (id: string) => void;
   /**
    * True when the user is signed in, the query succeeded, and it came back
    * empty. Distinct from `loading` and from `error` — this is the
@@ -57,77 +77,100 @@ export type ActiveUnitState = {
   error: Error | null;
 };
 
-const EMPTY: ActiveUnitState = {
-  loading: false,
-  unitId: null,
-  unit: null,
-  ownedUnitIds: [],
-  hasNoUnits: false,
-  error: null,
+type UnitsState = {
+  loading: boolean;
+  docs: { id: string; data: UnitDoc }[];
+  error: Error | null;
 };
+
+const NO_UNITS: UnitsState = { loading: false, docs: [], error: null };
 
 const ActiveUnitContext = createContext<ActiveUnitState | undefined>(undefined);
 
 export function ActiveUnitProvider({ children }: { children: React.ReactNode }) {
-  const { user, initializing } = useAuth();
+  const { user, initializing, isAdmin } = useAuth();
   const uid = user?.uid ?? null;
 
-  const [state, setState] = useState<ActiveUnitState>({ ...EMPTY, loading: true });
+  const [units, setUnits] = useState<UnitsState>({ ...NO_UNITS, loading: true });
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Restore the last pick. Best effort: storage can be unavailable (private
+  // browsing), and then the default choice below applies.
+  useEffect(() => {
+    AsyncStorage.getItem(SELECTED_UNIT_KEY)
+      .then((id) => {
+        if (id) setSelectedId((cur) => cur ?? id);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     // Wait for auth to settle before deciding there is no user, otherwise the
     // first paint after a reload reports "no units" for the split second
     // before onAuthStateChanged fires.
     if (initializing) {
-      setState({ ...EMPTY, loading: true });
+      setUnits({ ...NO_UNITS, loading: true });
       return;
     }
     if (!uid) {
-      setState(EMPTY);
+      setUnits(NO_UNITS);
       return;
     }
 
-    setState({ ...EMPTY, loading: true });
+    setUnits({ ...NO_UNITS, loading: true });
 
     const { db } = getFirebase();
     // Subscribed rather than fetched once so claiming a unit (or having one
-    // released) reflects without a reload. The where() clause is also what
-    // makes this readable at all: the rules allow a list of /units only when
-    // the query filters on ownerId, so the server can prove no other user's
-    // unit can come back.
-    const q = query(collection(db, 'units'), where('ownerId', '==', uid));
+    // released) reflects without a reload. For customers the where() clause
+    // is also what makes this readable at all: the rules allow a list of
+    // /units only when the query filters on ownerId, so the server can prove
+    // no other user's unit can come back. Admins may list the whole fleet.
+    const q = isAdmin
+      ? query(collection(db, 'units'))
+      : query(collection(db, 'units'), where('ownerId', '==', uid));
 
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const docs = snap.docs.map((d) => ({ id: d.id, data: d.data() as UnitDoc }));
-        const ownedUnitIds = docs.map((d) => d.id);
-
-        // Pin wins only if owned; otherwise first owned unit. Sorted so the
-        // default is stable across snapshots instead of depending on the
-        // order Firestore happens to return.
-        ownedUnitIds.sort();
-        const chosenId =
-          (PINNED_UNIT_ID && ownedUnitIds.includes(PINNED_UNIT_ID)
-            ? PINNED_UNIT_ID
-            : ownedUnitIds[0]) ?? null;
-        const chosen = docs.find((d) => d.id === chosenId) ?? null;
-
-        setState({
-          loading: false,
-          unitId: chosenId,
-          unit: chosen?.data ?? null,
-          ownedUnitIds,
-          hasNoUnits: ownedUnitIds.length === 0,
-          error: null,
-        });
+        const docs = snap.docs
+          .map((d) => ({ id: d.id, data: d.data() as UnitDoc }))
+          // Sorted so the default is stable across snapshots instead of
+          // depending on the order Firestore happens to return.
+          .sort((a, b) => a.id.localeCompare(b.id));
+        setUnits({ loading: false, docs, error: null });
       },
       (err) => {
-        setState({ ...EMPTY, error: err as Error });
+        setUnits({ ...NO_UNITS, error: err as Error });
       },
     );
     return unsub;
-  }, [uid, initializing]);
+  }, [uid, initializing, isAdmin]);
+
+  const setUnitId = useCallback((id: string) => {
+    setSelectedId(id);
+    AsyncStorage.setItem(SELECTED_UNIT_KEY, id).catch(() => {});
+  }, []);
+
+  const state = useMemo<ActiveUnitState>(() => {
+    const unitIds = units.docs.map((d) => d.id);
+    // Explicit pick, then the build-time pin, then the first unit — each only
+    // if this user can actually open it.
+    const chosenId =
+      [selectedId, PINNED_UNIT_ID].find((id) => id && unitIds.includes(id)) ??
+      unitIds[0] ??
+      null;
+    const chosen = units.docs.find((d) => d.id === chosenId) ?? null;
+    return {
+      loading: units.loading,
+      unitId: chosenId,
+      unit: chosen?.data ?? null,
+      unitIds,
+      isOwner: !!chosen && !!uid && chosen.data.ownerId === uid,
+      setUnitId,
+      hasNoUnits: !units.loading && !units.error && !!uid && unitIds.length === 0,
+      error: units.error,
+    };
+  }, [units, selectedId, uid, setUnitId]);
 
   return (
     <ActiveUnitContext.Provider value={state}>{children}</ActiveUnitContext.Provider>

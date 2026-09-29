@@ -162,44 +162,51 @@ async function fanoutExpoPush(
   copy: { title: string; body: (p: Record<string, unknown>) => string },
   payload: Record<string, unknown>,
 ): Promise<void> {
-  // Find the owner of this unit.
-  const unitDoc = await db.doc(`units/${unitId}`).get();
+  // Recipients: the unit's owner, plus any fleet admin who opted in to fleet
+  // alerts via fleet/admins.pushUids. Opt-in rather than "every admin" so
+  // staff choose to get every unit's alerts; the admin claim alone only
+  // grants access. Deduped so an admin who owns the unit isn't pinged twice.
+  const [unitDoc, adminsDoc] = await Promise.all([
+    db.doc(`units/${unitId}`).get(),
+    db.doc('fleet/admins').get(),
+  ]);
   const ownerId = unitDoc.get('ownerId') as string | null;
   if (!ownerId) {
     logger.warn(`event/${kind} on unit ${unitId} — no owner, skipping push`);
     return;
   }
-
-  // Pull push tokens.
-  const tokensSnap = await db.collection(`users/${ownerId}/pushTokens`).get();
-  if (tokensSnap.empty) {
-    logger.info(`event/${kind} for ${ownerId} — no push tokens registered`);
-    return;
-  }
+  const adminUids = (adminsDoc.get('pushUids') as string[] | undefined) ?? [];
+  const recipients = [...new Set([ownerId, ...adminUids])];
 
   const messages: ExpoPushMessage[] = [];
   const invalidTokens: string[] = [];
-  tokensSnap.forEach((doc) => {
-    const token = doc.get('token') as string;
-    if (!Expo.isExpoPushToken(token)) {
-      invalidTokens.push(doc.id);
-      return;
-    }
-    messages.push({
-      to: token,
-      sound: 'default',
-      title: copy.title,
-      body: copy.body(payload),
-      data: { unitId, eventId, kind },
+  const snaps = await Promise.all(
+    recipients.map((uid) => db.collection(`users/${uid}/pushTokens`).get()),
+  );
+  for (const tokensSnap of snaps) {
+    tokensSnap.forEach((doc) => {
+      const token = doc.get('token') as string;
+      if (!Expo.isExpoPushToken(token)) {
+        invalidTokens.push(doc.ref.path);
+        return;
+      }
+      messages.push({
+        to: token,
+        sound: 'default',
+        title: copy.title,
+        body: copy.body(payload),
+        data: { unitId, eventId, kind },
+      });
     });
-  });
+  }
 
   // Prune invalid tokens so we don't keep paying for them.
-  await Promise.all(
-    invalidTokens.map((id) =>
-      db.doc(`users/${ownerId}/pushTokens/${id}`).delete().catch(() => {})
-    ),
-  );
+  await Promise.all(invalidTokens.map((path) => db.doc(path).delete().catch(() => {})));
+
+  if (messages.length === 0) {
+    logger.info(`event/${kind} on ${unitId} — no push tokens registered for ${recipients.join(', ')}`);
+    return;
+  }
 
   // Expo batches up to 100 messages per chunk.
   const chunks = expo.chunkPushNotifications(messages);
