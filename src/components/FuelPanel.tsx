@@ -87,8 +87,12 @@ export function FuelPanel({ unitId }: FuelPanelProps) {
         ? colors.warning
         : colors.textDisplay;
 
-  const runway = runwayLabel(model.runwayDays);
-  const pct = model.pctTank; // 0–1 or null
+  // Stale anchor: the estimate hit empty but the engine kept running, so a
+  // refuel went unlogged. Don't show a level we know is wrong.
+  const stale = model.alert === 'stale';
+  const level = stale ? null : model.level;
+  const runway = runwayLabel(stale ? null : model.runwayDays);
+  const pct = stale ? null : model.pctTank; // 0–1 or null
   const fillPct = pct === null ? 0 : Math.max(0, Math.min(1, pct));
 
   const sparkMax = Math.max(...model.sparkline, 1e-6);
@@ -109,7 +113,9 @@ export function FuelPanel({ unitId }: FuelPanelProps) {
               ? model.ranDryDetected
                 ? 'TANK RAN DRY · REFUEL REQUIRED'
                 : 'OUT OF FUEL · REFUEL REQUIRED'
-              : 'LOW FUEL · REFUEL SOON'}
+              : stale
+                ? 'REFUEL NOT LOGGED? · LEVEL UNKNOWN'
+                : 'LOW FUEL · REFUEL SOON'}
           </Text>
         </View>
       )}
@@ -124,7 +130,9 @@ export function FuelPanel({ unitId }: FuelPanelProps) {
           <Text style={styles.heroUnit}>{runway.unit}</Text>
         </View>
         <Text style={styles.heroSub}>
-          {model.level === null
+          {stale
+            ? 'ENGINE KEPT RUNNING · LOG YOUR LAST FILL'
+            : model.level === null
             ? 'LOG A REFUEL TO START TRACKING'
             : model.projectedEmptyMs !== null
               ? `EMPTY ~${new Date(model.projectedEmptyMs)
@@ -148,7 +156,7 @@ export function FuelPanel({ unitId }: FuelPanelProps) {
         </View>
         <View style={styles.gaugeLabels}>
           <Text style={styles.gaugeLevel}>
-            {fmt(model.level)} / {fmt(model.tankGallons)} GAL
+            {fmt(level)} / {fmt(model.tankGallons)} GAL
           </Text>
           <Text style={styles.gaugePct}>
             {pct === null ? '—' : `${Math.round(fillPct * 100)}%`}

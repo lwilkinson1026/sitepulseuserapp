@@ -23,10 +23,14 @@ export function FuelAlertBanner({ unitId }: FuelAlertBannerProps) {
       ? model.ranDryDetected
         ? 'TANK RAN DRY'
         : 'OUT OF FUEL'
-      : 'LOW FUEL';
+      : model.alert === 'stale'
+        ? 'FUEL UNKNOWN'
+        : 'LOW FUEL';
 
   const detail =
-    model.level !== null
+    model.alert === 'stale'
+      ? 'LOG YOUR LAST REFUEL'
+      : model.level !== null
       ? `${model.level.toFixed(1)} GAL LEFT` +
         (model.runwayDays !== null && model.runwayDays < 10
           ? `  ·  ~${model.runwayDays < 1 ? `${Math.round(model.runwayDays * 24)} HR` : `${model.runwayDays.toFixed(1)} D`}`
