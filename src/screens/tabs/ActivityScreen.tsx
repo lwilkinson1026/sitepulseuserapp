@@ -34,6 +34,8 @@ const KIND_LABEL: Record<EventKind, string> = {
   'fuel.low':       'LOW FUEL',
   'fuel.empty':     'OUT OF FUEL',
   'bot.command':    'FLEET BOT',
+  'schedule.decision': 'SCHEDULE',
+  'sentry.scare':   'SENTRY SCARE',
   'battery.low':    'BATTERY LOW',
 };
 
@@ -54,6 +56,13 @@ function summarize(event: EventEntry): string {
       const reason = typeof p.reason === 'string' ? p.reason.toUpperCase() : null;
       return reason ?? (event.source === 'app' ? 'MANUAL' : 'AUTO');
     }
+    case 'schedule.decision': {
+      const desired = p.desired === 'run' ? 'WANTS RUN' : 'WANTS IDLE';
+      const reason = typeof p.reason === 'string' ? `  ·  ${p.reason.toUpperCase()}` : '';
+      return `${desired}${reason}`;
+    }
+    case 'sentry.scare':
+      return typeof p.phase === 'string' ? p.phase.toUpperCase() : '—';
     case 'bot.command': {
       const tool = typeof p.tool === 'string' ? p.tool.replace(/_/g, ' ').toUpperCase() : 'COMMAND';
       const why = typeof p.reason === 'string' ? `  ·  ${p.reason}` : '';
