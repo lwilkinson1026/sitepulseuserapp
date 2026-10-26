@@ -28,7 +28,10 @@ export interface EngineSession {
   endMs: number;
 }
 
-export type FuelAlert = 'ok' | 'low' | 'empty';
+// 'stale' = the engine kept running well past the point the model says the
+// tank emptied, so a refuel almost certainly went unlogged. The level is
+// unknowable until the next logged fill; show that instead of a false 'empty'.
+export type FuelAlert = 'ok' | 'low' | 'empty' | 'stale';
 
 export interface FuelModel {
   // Level / tank
@@ -57,6 +60,7 @@ export interface FuelModel {
   // Status
   engineRunning: boolean;
   ranDryDetected: boolean;            // dry stop since the last refuel
+  unloggedRefuelSuspected: boolean;   // ran on long after the estimate hit 0
   alert: FuelAlert;
 }
 
@@ -74,12 +78,24 @@ const SPARK_DAYS = 14;                // sparkline buckets
 const LOW_PCT = 0.15;                 // low-fuel warning: tank fraction
 const LOW_RUNWAY_DAYS = 1;            // low-fuel warning: projected runway
 const DRY_SOC_FULL = 95;             // socAtStop ≥ this ⇒ not a dry stop
-const DRY_PLAUSIBLE_LOW = 0.3;        // dry-stop runtime sanity band (× expected)
-const DRY_PLAUSIBLE_HIGH = 3.0;
+const PLAUSIBLE_LOW = 0.3;            // calibration runtime sanity band (× expected)
+const PLAUSIBLE_HIGH = 3.0;
+const MAX_UNPAIRED_SESSION_HOURS = 8; // cap a session whose stop never arrived
+const STALE_AFTER_EMPTY_HOURS = 2;    // runtime past "empty" ⇒ unlogged refuel
 const DAY_MS = 86_400_000;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+// Only the engine listener's running-state edge events (engine.py
+// _emit_engine_edge_event) mean the engine physically started or stopped;
+// they carry `payload.state`. The recharge scheduler also writes
+// engine.start/stop (`payload.reason`: soc_low, window_closed…) but those are
+// decisions from a stub that drives no hardware, and the sentry scare pulse
+// is the same stub. Counting them more than doubled UNIT-002's runtime.
+function isEngineEdge(e: RawFuelEvent): boolean {
+  return typeof e.payload.state === 'string';
 }
 
 interface RefuelRecord {
@@ -117,12 +133,17 @@ export function computeFuelModel(
 
   // ── 1. Pair engine start/stop into runtime sessions ──────────────────────
   const sessions: EngineSession[] = [];
+  const maxUnpairedMs = MAX_UNPAIRED_SESSION_HOURS * 3_600_000;
   let openStart: number | null = null;
   for (const e of events) {
+    if (!isEngineEdge(e)) continue;
     if (e.kind === 'engine.start') {
-      // A start while one is already open means we dropped the stop — close
-      // the prior session at this start (conservative: counts the gap).
-      if (openStart !== null) sessions.push({ startMs: openStart, endMs: e.atMs });
+      // A start while one is already open means we dropped the stop (e.g. the
+      // listener restarted mid-run). Close the prior session at this start,
+      // but cap it — the gap can be days.
+      if (openStart !== null) {
+        sessions.push({ startMs: openStart, endMs: Math.min(e.atMs, openStart + maxUnpairedMs) });
+      }
       openStart = e.atMs;
     } else if (e.kind === 'engine.stop') {
       if (openStart !== null) {
@@ -133,7 +154,9 @@ export function computeFuelModel(
     }
   }
   const engineRunning = openStart !== null;
-  if (openStart !== null) sessions.push({ startMs: openStart, endMs: nowMs });
+  if (openStart !== null) {
+    sessions.push({ startMs: openStart, endMs: Math.min(nowMs, openStart + maxUnpairedMs) });
+  }
 
   const runtime = makeRuntimeFn(sessions);
 
@@ -196,13 +219,12 @@ export function computeFuelModel(
     if (a.runtimeH < MIN_CALIB_RUNTIME_HOURS || a.consumed <= 0) continue;
     const rObs = a.consumed / a.runtimeH;
     if (rObs < R_MIN || rObs > R_MAX) continue;
-    if (a.dry) {
-      // Reject implausible dry stops (a fault that killed the engine early
-      // looks like a dry stop but burned far less than a tank).
-      const expected = a.consumed / r;
-      if (a.runtimeH < DRY_PLAUSIBLE_LOW * expected || a.runtimeH > DRY_PLAUSIBLE_HIGH * expected) {
-        continue;
-      }
+    // Reject implausible anchors. A fault that killed the engine early looks
+    // like a dry stop but burned far less than a tank; a refuel that went
+    // unlogged mid-interval makes the closing pour look tiny for the runtime.
+    const expected = a.consumed / r;
+    if (a.runtimeH < PLAUSIBLE_LOW * expected || a.runtimeH > PLAUSIBLE_HIGH * expected) {
+      continue;
     }
     r = clamp(EMA_ALPHA * rObs + (1 - EMA_ALPHA) * r, R_MIN, R_MAX);
     samples += 1;
@@ -227,6 +249,15 @@ export function computeFuelModel(
 
   const ranDryDetected =
     lastRefuel != null && dryStops.some((d) => d.atMs > lastRefuel.atMs);
+
+  // The engine can't run on an empty tank. If it has kept running for a while
+  // after the estimate reached zero (and didn't stall dry), someone refuelled
+  // without logging it — the anchor is stale, not the tank empty.
+  const unloggedRefuelSuspected =
+    lastRefuel != null &&
+    !ranDryDetected &&
+    burnedSinceRefuelGallons != null &&
+    burnedSinceRefuelGallons > lastRefuel.levelAfter + r * STALE_AFTER_EMPTY_HOURS;
 
   // ── 5. Trend / projection ────────────────────────────────────────────────
   const firstEventMs = events.length ? events[0].atMs : nowMs;
@@ -257,7 +288,9 @@ export function computeFuelModel(
 
   // ── 6. Alert state ───────────────────────────────────────────────────────
   let alert: FuelAlert = 'ok';
-  if (level != null) {
+  if (unloggedRefuelSuspected) {
+    alert = 'stale';
+  } else if (level != null) {
     if (level <= 0.001 || ranDryDetected) {
       alert = 'empty';
     } else if (
@@ -286,6 +319,7 @@ export function computeFuelModel(
     sparkline,
     engineRunning,
     ranDryDetected,
+    unloggedRefuelSuspected,
     alert,
   };
 }
