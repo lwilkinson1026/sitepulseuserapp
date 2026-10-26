@@ -7,8 +7,11 @@ Every SITEPULSE_SCHEDULER_INTERVAL seconds (default 30):
      asleep and battery_soc is null (see voltage_soc.py).
   2. Read user config from `units/{UNIT_ID}/config/charge`.
   3. Evaluate `(now, soc, config)` → `(desired, reason)`.
-  4. If desired flips, log an `engine.start` / `engine.stop` event and call
-     the VESC stub. The real CAN frame goes in `_vesc_set_current` later.
+  4. If desired flips, log a `schedule.decision` event and call the VESC
+     stub. The real CAN frame goes in `_vesc_set_current` later. These are
+     decisions, not engine starts/stops — only engine.py's running-state
+     edges emit `engine.start` / `engine.stop` (the fuel model and push
+     fan-out treat those as physical runtime).
   5. Write `units/{UNIT_ID}/current/engine` so the app can render.
 
 Quiet-hours behavior matches the locked-in plan: when SoC drops to
@@ -273,10 +276,10 @@ def trigger_scare_pulse(db: firestore.Client, unit_id: str, duration_s: int = 20
         global _scare_active
         try:
             db.collection(f"units/{unit_id}/events").add({
-                "kind": "engine.start",
+                "kind": "sentry.scare",
                 "at": firestore.SERVER_TIMESTAMP,
                 "source": "pi",
-                "payload": {"reason": "sentry_scare", "duration_s": duration_s},
+                "payload": {"phase": "start", "duration_s": duration_s},
             })
             amps = float(os.environ.get("SITEPULSE_ENGINE_CURRENT", "30"))
             _vesc_set_current(amps)
@@ -290,10 +293,10 @@ def trigger_scare_pulse(db: firestore.Client, unit_id: str, duration_s: int = 20
                 pass
             try:
                 db.collection(f"units/{unit_id}/events").add({
-                    "kind": "engine.stop",
+                    "kind": "sentry.scare",
                     "at": firestore.SERVER_TIMESTAMP,
                     "source": "pi",
-                    "payload": {"reason": "sentry_scare_complete"},
+                    "payload": {"phase": "complete", "duration_s": duration_s},
                 })
             except Exception:
                 pass
@@ -327,12 +330,15 @@ def _emit_critical_event(db: firestore.Client, unit_id: str, soc: float) -> None
     })
 
 
-def _emit_state_change_event(db: firestore.Client, unit_id: str, kind: str, reason: str) -> None:
+def _emit_decision_event(db: firestore.Client, unit_id: str, desired: str, reason: str) -> None:
+    """Log a desired-state flip. Deliberately NOT engine.start/stop: the
+    scheduler drives no hardware yet, and those kinds mean the engine
+    physically changed state."""
     db.collection(f"units/{unit_id}/events").add({
-        "kind": kind,
+        "kind": "schedule.decision",
         "at": firestore.SERVER_TIMESTAMP,
         "source": "pi",
-        "payload": {"reason": reason},
+        "payload": {"desired": desired, "reason": reason},
     })
 
 
@@ -409,10 +415,9 @@ def start_scheduler(db: firestore.Client, unit_id: str) -> threading.Thread:
                 if desired != _prior_desired:
                     if desired == "run":
                         _vesc_set_current(float(config.get("engineCurrent", 30)))
-                        _emit_state_change_event(db, unit_id, "engine.start", reason)
                     else:
                         _vesc_set_current(0.0)
-                        _emit_state_change_event(db, unit_id, "engine.stop", reason)
+                    _emit_decision_event(db, unit_id, desired, reason)
                     _prior_desired = desired
 
                 # Mirror the decision so the app can render the live state row.

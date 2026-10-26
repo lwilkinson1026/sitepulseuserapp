@@ -503,6 +503,12 @@ export type EventKind =
   | 'fuel.empty'
   // AI fleet bot took a significant action (functions/src/fleetMcp.ts)
   | 'bot.command'
+  // Recharge scheduler flipped its desired state (pi/scheduler.py). A
+  // decision only — the scheduler drives no hardware yet. Older events wrote
+  // these as engine.start/stop with payload.reason.
+  | 'schedule.decision'
+  // Sentry scare pulse fired / finished (pi/scheduler.py)
+  | 'sentry.scare'
   // Cloud monitor: battery crossed below 10 % (functions/src/grokAlerts.ts)
   | 'battery.low';
 
