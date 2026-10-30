@@ -450,6 +450,9 @@ export interface EngineState {
   maxDurationSec?: number;
   phase?: string;                  // intra-state phase tag (e.g. 'spark_on')
   error?: string;                  // populated on failed_error
+  // Set by engine.stop when spark is off but the engine kept turning; the
+  // state stays 'running' (it is). Cleared on the next state change.
+  stopError?: string;
   // End-of-run metadata attached when the loop closes out. Engine.py
   // writes these on the transition into running / failed_*.
   peakCurrentAmps?: number;
