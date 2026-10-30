@@ -130,5 +130,70 @@ class StartSequence(unittest.TestCase):
         self.assertEqual(spark, ["on", "off"])
 
 
+class StopSequence(unittest.TestCase):
+    def _run(self, final_rpm):
+        states = []
+        spark = []
+        with mock.patch.object(engine, "_load_stop_config",
+                               return_value=dict(engine.DEFAULT_STOP_CONFIG)), \
+             mock.patch.object(engine, "_wait_for_rpm_idle", return_value=final_rpm), \
+             mock.patch.object(engine, "_publish_state",
+                               side_effect=lambda db, u, s, extra=None: states.append((s, extra or {}))), \
+             mock.patch.object(engine, "_set_spark_safely",
+                               side_effect=lambda db, u, ch, mode: spark.append(mode)):
+            engine.handle_engine_stop(None, "UNIT-TEST", {})
+        return states, spark
+
+    def test_engine_stops(self):
+        states, spark = self._run(40)
+        self.assertEqual([s for s, _ in states], ["stopping", "idle"])
+        self.assertEqual(states[-1][1]["finalRpm"], 40)
+        self.assertEqual(spark, ["off"])
+
+    def test_no_can_frames_still_counts_as_stopped(self):
+        states, _ = self._run(None)
+        self.assertEqual(states[-1][0], "idle")
+        self.assertEqual(states[-1][1]["finalRpm"], "unknown")
+
+    def test_still_turning_fails_and_stays_running(self):
+        # UNIT-004 2026-10-29: spark off, kill lead not grounding, 76k eRPM.
+        with self.assertRaises(RuntimeError) as cm:
+            self._run(-76_248)
+        self.assertIn("still turning", str(cm.exception))
+        self.assertFalse(engine._engine_lock.locked())
+
+    def test_failed_stop_publishes_running_with_stop_error(self):
+        states = []
+        with mock.patch.object(engine, "_load_stop_config",
+                               return_value=dict(engine.DEFAULT_STOP_CONFIG)), \
+             mock.patch.object(engine, "_wait_for_rpm_idle", return_value=76_248), \
+             mock.patch.object(engine, "_publish_state",
+                               side_effect=lambda db, u, s, extra=None: states.append((s, extra or {}))), \
+             mock.patch.object(engine, "_set_spark_safely"):
+            with self.assertRaises(RuntimeError):
+                engine.handle_engine_stop(None, "UNIT-TEST", {})
+        state, meta = states[-1]
+        self.assertEqual(state, "running")
+        self.assertIn("relay 2", meta["stopError"])
+        self.assertEqual(meta["finalRpm"], 76_248)
+        self.assertNotIn("idle", [s for s, _ in states])
+
+
+class PublishStateStopError(unittest.TestCase):
+    def _published(self, state, extra=None):
+        db = mock.MagicMock()
+        with mock.patch.object(engine, "_emit_engine_edge_event"):
+            engine._publish_state(db, "UNIT-TEST", state, extra)
+        return db.document.return_value.set.call_args[0][0]
+
+    def test_leaving_running_clears_stop_error(self):
+        for state in ("idle", "starting", "stopping", "failed_error"):
+            self.assertIs(self._published(state)["stopError"], engine.firestore.DELETE_FIELD)
+
+    def test_running_keeps_stop_error(self):
+        self.assertNotIn("stopError", self._published("running"))
+        self.assertEqual(self._published("running", {"stopError": "x"})["stopError"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()

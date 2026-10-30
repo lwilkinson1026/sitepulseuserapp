@@ -327,6 +327,10 @@ def _publish_state(
     }
     if extra:
         payload.update(extra)
+    if state != "running" and "stopError" not in payload:
+        # A failed stop leaves the engine "running" with stopError set (see
+        # handle_engine_stop); any later transition means it's been dealt with.
+        payload["stopError"] = firestore.DELETE_FIELD
     try:
         db.document(f"units/{unit_id}/current/engine").set(payload, merge=True)
     except Exception as e:
@@ -1233,7 +1237,10 @@ def handle_engine_stop(
       1. Signal any active charge loop to abort, wait for it.
       2. Turn off the spark relay.
       3. Watch RPM until it falls under rpmIdleThreshold or timeout.
-      4. Publish state = "idle".
+      4. Publish state = "idle". If RPM is still above the threshold at the
+         timeout, publish "running" with stopError and raise, so the command
+         is acked as failed rather than reporting a stop that didn't happen.
+         No CAN frames at all (final RPM unknown) still counts as stopped.
 
     Safe to call when the engine isn't actually running — just signals
     and de-energizes whatever's on. No payload options for v1.
@@ -1268,6 +1275,25 @@ def handle_engine_stop(
             print(f"[engine.stop] spark off failed: {e!r}", flush=True)
 
         final_rpm = _wait_for_rpm_idle(idle_thresh, rpm_timeout)
+
+        if final_rpm is not None and abs(final_rpm) > idle_thresh:
+            # Spark is off but the engine is still turning: the kill lead
+            # isn't grounding the magneto. Say so instead of reporting
+            # "idle" — UNIT-002 and UNIT-004 both had a stop that "succeeded"
+            # on a running engine. Publishing "running" keeps the fans on
+            # (engine-follow) and the state truthful; spark stays off.
+            detail = (
+                f"engine still turning {final_rpm} eRPM {rpm_timeout:g}s "
+                f"after spark off — check the kill wiring on relay "
+                f"{spark_channel}; stop it by hand"
+            )
+            _publish_state(db, unit_id, "running", {
+                "stopError":    detail,
+                "stopFailedAt": firestore.SERVER_TIMESTAMP,
+                "finalRpm":     final_rpm,
+            })
+            print(f"[engine.stop] FAILED: {detail}", flush=True)
+            raise RuntimeError(f"engine.stop: {detail}")
 
         _publish_state(db, unit_id, "idle", {
             "stoppedAt": firestore.SERVER_TIMESTAMP,

@@ -45,8 +45,12 @@ const HIDDEN_STATES = new Set<EngineMachineState>(['idle']);
 // Severity classification drives the dot color and pulse animation.
 type Severity = 'transitional' | 'live' | 'failed';
 
-function classify(state: EngineMachineState | undefined): Severity | null {
+function classify(
+  state: EngineMachineState | undefined,
+  stopFailed: boolean,
+): Severity | null {
   if (!state || HIDDEN_STATES.has(state)) return null;
+  if (stopFailed) return 'failed';
   if (state.startsWith('failed_')) return 'failed';
   if (state === 'running' || state === 'charging') return 'live';
   return 'transitional';
@@ -54,7 +58,9 @@ function classify(state: EngineMachineState | undefined): Severity | null {
 
 // Compact human label for each state. Keep these short — they share one
 // line with the live metric.
-function labelFor(state: EngineMachineState): string {
+function labelFor(state: EngineMachineState, stopFailed: boolean): string {
+  // The Pi cut the spark but the engine kept running: the kill isn't working.
+  if (stopFailed) return 'STOP FAILED · STOP BY HAND';
   switch (state) {
     case 'starting':              return 'STARTING';
     case 'cranking':              return 'CRANKING';
@@ -147,7 +153,8 @@ export function EngineStatusBar({
   const snapDoc = useUnitDoc<TelemetrySnapshot>(unitId, 'current', 'snapshot');
 
   const state = engineDoc.data?.state;
-  const severity = classify(state);
+  const stopFailed = state === 'running' && !!engineDoc.data?.stopError;
+  const severity = classify(state, stopFailed);
 
   // Track whether the user has dismissed a failed state. Reset whenever
   // the underlying state changes (so a fresh failure shows the bar again).
@@ -222,7 +229,7 @@ export function EngineStatusBar({
         accessibilityRole="button"
         accessibilityLabel={[
           'Engine status:',
-          labelFor(state),
+          labelFor(state, stopFailed),
           metric ?? '',
           severity === 'failed' ? '. Tap to dismiss' : '. Tap for details',
         ].join(' ')}
@@ -234,7 +241,7 @@ export function EngineStatusBar({
           ]}
         />
         <Text style={styles.label} numberOfLines={1}>
-          {labelFor(state)}
+          {labelFor(state, stopFailed)}
           {metric ? (
             <Text style={styles.metric}>{`  ·  ${metric}`}</Text>
           ) : null}
