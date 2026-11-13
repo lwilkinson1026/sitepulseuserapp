@@ -3,6 +3,7 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { AuthStack } from './AuthStack';
 import { MainTabs } from './MainTabs';
+import { RentalGate } from './RentalGate';
 import { useAuth } from '../hooks/AuthContext';
 import { colors } from '../theme';
 
@@ -36,7 +37,13 @@ export function RootNavigator() {
 
   return (
     <NavigationContainer theme={navTheme}>
-      {user ? <MainTabs /> : <AuthStack />}
+      {user ? (
+        <RentalGate>
+          <MainTabs />
+        </RentalGate>
+      ) : (
+        <AuthStack />
+      )}
     </NavigationContainer>
   );
 }
