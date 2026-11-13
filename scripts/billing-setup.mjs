@@ -10,8 +10,14 @@
 //   UNIT_ID=UNIT-002 FIRST_CHARGE=2026-09-26T09:00:00-04:00 \
 //     node scripts/billing-setup.mjs
 //
-// It asks for the Stripe secret key with hidden input (so it stays out of
-// shell history); STRIPE_SECRET_KEY in the environment skips the prompt.
+// Stripe secret key, first match wins:
+//   1. STRIPE_SECRET_KEY in the environment (use this for an sk_test_ key)
+//   2. the LIVE key the Cloud Functions use, read from Secret Manager
+//      (projects/sitepulse-userapp/secrets/STRIPE_SECRET_KEY) with your Google
+//      login — so there is nothing to copy/paste. STRIPE_KEY_SOURCE=prompt
+//      skips this.
+//   3. a hidden-input prompt (stays out of shell history)
+// The key is never printed.
 //
 // Optional:
 //   PAYMENT_METHODS=card,us_bank_account   (default: card)
@@ -34,7 +40,10 @@ const require = createRequire(new URL('../functions/package.json', import.meta.u
 const Stripe = require('stripe');
 
 const UNIT_ID = process.env.UNIT_ID;
-const KEY = process.env.STRIPE_SECRET_KEY || (await promptHidden('Stripe secret key (sk_test_… or sk_live_…): '));
+const KEY =
+  process.env.STRIPE_SECRET_KEY ||
+  (process.env.STRIPE_KEY_SOURCE === 'prompt' ? null : await keyFromSecretManager()) ||
+  (await promptHidden('Stripe secret key (sk_test_… or sk_live_…): '));
 const SA_PATH = process.env.SERVICE_ACCOUNT ?? './scripts/service-account.json';
 const AMOUNT_CENTS = Number(process.env.AMOUNT_CENTS ?? 24900);
 const PAYMENT_METHODS = (process.env.PAYMENT_METHODS ?? 'card').split(',').map((s) => s.trim());
@@ -127,6 +136,28 @@ await db.doc(`units/${UNIT_ID}/billing/plan`).set(
 
 console.log(`Wrote units/${UNIT_ID}/billing/plan (${mode}).`);
 process.exit(0);
+
+// The live key as deployed for the billing functions. Returns null (and the
+// caller falls back to the prompt) if the Google login can't read it.
+async function keyFromSecretManager() {
+  const project = process.env.FIREBASE_PROJECT ?? 'sitepulse-userapp';
+  try {
+    const appRequire = createRequire(new URL('../package.json', import.meta.url));
+    const { GoogleAuth } = appRequire('google-auth-library');
+    const client = await new GoogleAuth({
+      scopes: 'https://www.googleapis.com/auth/cloud-platform',
+    }).getClient();
+    const res = await client.request({
+      url: `https://secretmanager.googleapis.com/v1/projects/${project}/secrets/STRIPE_SECRET_KEY/versions/latest:access`,
+    });
+    const key = Buffer.from(res.data.payload.data, 'base64').toString('utf8').trim();
+    console.log(`Stripe key: Secret Manager STRIPE_SECRET_KEY v${res.data.name.split('/').pop()}`);
+    return key;
+  } catch (e) {
+    console.log(`Stripe key: could not read Secret Manager (${e.response?.status ?? e.message}); asking instead.`);
+    return null;
+  }
+}
 
 // Read a line from the TTY without echoing it.
 function promptHidden(question) {
