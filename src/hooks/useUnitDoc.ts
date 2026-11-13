@@ -31,6 +31,12 @@ export function useUnitDoc<T>(
 
   // useEffect deps include the joined path so any change re-subscribes.
   const path = pathSegments.join('/');
+  // Which doc the current data/error belong to. When unitId changes (e.g.
+  // null → the user's unit once ownership resolves), the render before the
+  // effect runs would otherwise report loading=false with no data — callers
+  // like RentalGate would briefly treat "not loaded yet" as "doc missing".
+  const key = unitId ? `${unitId}/${path}` : null;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!unitId) {
@@ -45,10 +51,12 @@ export function useUnitDoc<T>(
       ref,
       (snap) => {
         setData(snap.exists() ? (snap.data() as T) : null);
+        setLoadedKey(key);
         setLoading(false);
       },
       (err) => {
         setError(err);
+        setLoadedKey(key);
         setLoading(false);
       },
     );
@@ -56,5 +64,5 @@ export function useUnitDoc<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitId, path]);
 
-  return { loading, data, error };
+  return { loading: loading || (key !== null && loadedKey !== key), data, error };
 }
